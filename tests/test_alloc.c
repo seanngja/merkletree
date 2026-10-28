@@ -54,38 +54,46 @@ void __wrap_free(void *pointer)
 int main(void)
 {
     unsigned char input[16] = {0};
-    /* 31 nodes, one tree wrapper, one temporary pointer array. */
-    for (size_t failure = 1; failure <= 34; ++failure) {
-        allocation_count = 0;
-        fail_at = failure;
-        MerkleTree *tree = NULL;
-        MerkleStatus status = merkle_build(input, 16, 1, &tree);
-        if (failure <= 33) {
-            if (status != MERKLE_OUT_OF_MEMORY || tree != NULL) {
+    const MerkleLayout layouts[] = {MERKLE_LAYOUT_POINTER, MERKLE_LAYOUT_FLAT};
+    for (size_t l = 0; l < 2; ++l) {
+        /* Pointer: 31 nodes + wrapper + workspace. Flat: buffer + wrapper. */
+        size_t allocations = layouts[l] == MERKLE_LAYOUT_FLAT ? 2 : 33;
+        hash_fail_at = 0;
+        for (size_t failure = 1; failure <= allocations + 1; ++failure) {
+            allocation_count = 0;
+            fail_at = failure;
+            MerkleTree *tree = NULL;
+            MerkleStatus status = merkle_build_with_layout(input, 16, 1,
+                                                           layouts[l], &tree);
+            if (failure <= allocations) {
+                if (status != MERKLE_OUT_OF_MEMORY || tree != NULL) {
+                    return EXIT_FAILURE;
+                }
+            } else {
+                if (status != MERKLE_OK || tree == NULL
+                    || allocation_count != allocations) {
+                    return EXIT_FAILURE;
+                }
+                merkle_free(tree);
+            }
+            if (outstanding != 0) {
+                fprintf(stderr, "Leaked allocation when failure=%zu\n", failure);
                 return EXIT_FAILURE;
             }
-        } else {
-            if (status != MERKLE_OK || tree == NULL || allocation_count != 33) {
+        }
+        fail_at = 0;
+        for (size_t failure = 1; failure <= 31; ++failure) {
+            hash_count = 0;
+            hash_fail_at = failure;
+            MerkleTree *tree = NULL;
+            MerkleStatus status = merkle_build_with_layout(input, 16, 1,
+                                                           layouts[l], &tree);
+            if (status != MERKLE_HASH_ERROR || tree != NULL || outstanding != 0) {
+                fprintf(stderr, "Hash failure cleanup failed at hash=%zu\n", failure);
                 return EXIT_FAILURE;
             }
-            merkle_free(tree);
-        }
-        if (outstanding != 0) {
-            fprintf(stderr, "Leaked allocation when failure=%zu\n", failure);
-            return EXIT_FAILURE;
         }
     }
-    fail_at = 0;
-    for (size_t failure = 1; failure <= 31; ++failure) {
-        hash_count = 0;
-        hash_fail_at = failure;
-        MerkleTree *tree = NULL;
-        MerkleStatus status = merkle_build(input, 16, 1, &tree);
-        if (status != MERKLE_HASH_ERROR || tree != NULL || outstanding != 0) {
-            fprintf(stderr, "Hash failure cleanup failed at hash=%zu\n", failure);
-            return EXIT_FAILURE;
-        }
-    }
-    puts("Failure tests passed: every tree allocation and hash failure cleaned up.");
+    puts("Failure tests passed: every allocation/hash failure in both layouts cleaned up.");
     return EXIT_SUCCESS;
 }
