@@ -16,7 +16,11 @@ static void free_node(MerkleNode *node)
 void merkle_free(MerkleTree *tree)
 {
     if (tree != NULL) {
-        free_node(tree->root);
+        if (tree->layout == MERKLE_LAYOUT_FLAT) {
+            free(tree->flat_hashes);
+        } else {
+            free_node(tree->root);
+        }
         free(tree);
     }
 }
@@ -24,28 +28,96 @@ void merkle_free(MerkleTree *tree)
 MerkleStatus merkle_build(const void *data, size_t leaf_count,
                          size_t block_size, MerkleTree **out)
 {
+    return merkle_build_with_layout(data, leaf_count, block_size,
+                                    MERKLE_LAYOUT_POINTER, out);
+}
+
+const unsigned char *merkle_root_hash(const MerkleTree *tree)
+{
+    if (tree == NULL) {
+        return NULL;
+    }
+    if (tree->layout == MERKLE_LAYOUT_FLAT) {
+        return tree->flat_hashes + (tree->node_count - 1) * SHA256_DIGEST_BYTES;
+    }
+    return tree->root->hash;
+}
+
+/* All hashes stay in one allocation. Offsets below are measured in nodes. */
+static MerkleStatus build_flat(const unsigned char *data, MerkleTree *tree)
+{
+    tree->flat_hashes = malloc(tree->node_count * SHA256_DIGEST_BYTES);
+    if (tree->flat_hashes == NULL) {
+        return MERKLE_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < tree->leaf_count; ++i) {
+        if (sha256_digest(data + i * tree->block_size, tree->block_size,
+                          tree->flat_hashes + i * SHA256_DIGEST_BYTES) != 0) {
+            return MERKLE_HASH_ERROR;
+        }
+    }
+    size_t offset = 0;
+    for (size_t width = tree->leaf_count; width > 1; width /= 2) {
+        size_t parent_offset = offset + width;
+        for (size_t i = 0; i < width / 2; ++i) {
+            /* Adjacent children already form the required 64-byte input. */
+            if (sha256_digest(tree->flat_hashes + (offset + 2 * i) * SHA256_DIGEST_BYTES,
+                              2 * SHA256_DIGEST_BYTES,
+                              tree->flat_hashes + (parent_offset + i) * SHA256_DIGEST_BYTES)
+                != 0) {
+                return MERKLE_HASH_ERROR;
+            }
+        }
+        offset = parent_offset;
+    }
+    return MERKLE_OK;
+}
+
+MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
+                                     size_t block_size, MerkleLayout layout,
+                                     MerkleTree **out)
+{
     if (out == NULL) {
         return MERKLE_INVALID_ARGUMENT;
     }
     *out = NULL;
-    if (data == NULL || leaf_count == 0 || block_size == 0
+    if ((layout != MERKLE_LAYOUT_POINTER && layout != MERKLE_LAYOUT_FLAT)
+        || data == NULL || leaf_count == 0 || block_size == 0
         || (leaf_count & (leaf_count - 1)) != 0) {
         return MERKLE_INVALID_ARGUMENT;
     }
     if (leaf_count > SIZE_MAX / block_size
-        || leaf_count > SIZE_MAX / sizeof(MerkleNode *)
+        || (layout == MERKLE_LAYOUT_POINTER
+            && leaf_count > SIZE_MAX / sizeof(MerkleNode *))
         || leaf_count > SIZE_MAX / 2 + 1
         || block_size > UINT64_MAX / 8) {
         return MERKLE_SIZE_OVERFLOW;
     }
     size_t node_count = leaf_count + (leaf_count - 1);
-    if (node_count > SIZE_MAX / sizeof(MerkleNode)) {
+    size_t node_size = layout == MERKLE_LAYOUT_FLAT
+                     ? SHA256_DIGEST_BYTES : sizeof(MerkleNode);
+    if (node_count > SIZE_MAX / node_size) {
         return MERKLE_SIZE_OVERFLOW;
     }
 
     MerkleTree *tree = malloc(sizeof(*tree));
     if (tree == NULL) {
         return MERKLE_OUT_OF_MEMORY;
+    }
+    tree->root = NULL;
+    tree->flat_hashes = NULL;
+    tree->layout = layout;
+    tree->leaf_count = leaf_count;
+    tree->block_size = block_size;
+    tree->node_count = node_count;
+    if (layout == MERKLE_LAYOUT_FLAT) {
+        MerkleStatus status = build_flat(data, tree);
+        if (status != MERKLE_OK) {
+            merkle_free(tree);
+            return status;
+        }
+        *out = tree;
+        return MERKLE_OK;
     }
     /* Temporary traversal workspace, not contiguous node/hash storage.
      * Each entry owns a disjoint subtree during construction. */
@@ -118,9 +190,6 @@ MerkleStatus merkle_build(const void *data, size_t leaf_count,
         }
     }
     tree->root = level[0];
-    tree->leaf_count = leaf_count;
-    tree->block_size = block_size;
-    tree->node_count = node_count;
     free(level);
     *out = tree;
     return MERKLE_OK;
@@ -131,7 +200,7 @@ const char *merkle_status_string(MerkleStatus status)
     switch (status) {
     case MERKLE_OK: return "success";
     case MERKLE_INVALID_ARGUMENT:
-        return "invalid argument (use a power-of-two leaf count and nonzero block size)";
+        return "invalid argument (check layout, power-of-two leaf count and nonzero block size)";
     case MERKLE_SIZE_OVERFLOW: return "requested size exceeds supported limits";
     case MERKLE_OUT_OF_MEMORY: return "memory allocation failed";
     case MERKLE_HASH_ERROR: return "OpenSSL SHA-256 hashing failed";

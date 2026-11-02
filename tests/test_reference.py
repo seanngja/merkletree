@@ -28,11 +28,17 @@ def run(*args):
 
 def check(data, leaves, block_size, path):
     path.write_bytes(data)
-    result = run(leaves, block_size, path)
-    assert result.returncode == 0, result.stderr
-    fields = dict(line.split("=", 1) for line in result.stdout.splitlines())
-    assert fields["root"] == reference(data, block_size), (leaves, block_size)
-    assert int(fields["nodes"]) == 2 * leaves - 1
+    expected = reference(data, block_size)
+    for layout in ("pointer", "flat"):
+        result = run("--layout", layout, leaves, block_size, path)
+        assert result.returncode == 0, result.stderr
+        fields = dict(line.split("=", 1) for line in result.stdout.splitlines())
+        assert fields["variant"] == f"sequential_{layout}"
+        assert fields["root"] == expected, (layout, leaves, block_size)
+        assert int(fields["nodes"]) == 2 * leaves - 1
+        if layout == "flat":
+            assert int(fields["node_storage_bytes"]) == (2 * leaves - 1) * 32
+            assert int(fields["temporary_pointer_bytes"]) == 0
 
 
 executable = Path(sys.argv[1]).resolve()
@@ -60,13 +66,25 @@ with tempfile.TemporaryDirectory(prefix="merkle-tests-") as directory:
     synthetic = run(8, 32)
     assert synthetic.returncode == 0, synthetic.stderr
     assert f"root={reference(data, 32)}" in synthetic.stdout
+    assert "variant=sequential_pointer" in synthetic.stdout
+    for args in (("--layout", "flat", 8, 32), (8, 32, "--layout", "flat"),
+                 ("--layout", "pointer", 8, 32)):
+        result = run(*args)
+        assert result.returncode == 0, result.stderr
+        assert f"root={reference(data, 32)}" in result.stdout
 
     for args in ((), ("-1", "32"), ("3", "32"), ("0", "32"), ("1", "0"),
                  ("1x", "32"), ("1", "32", path, "extra"),
                  ("18446744073709551616", "1"), ("1", "32", path / "missing")):
+        for prefix in ((), ("--layout", "flat")):
+            assert run(*prefix, *args).returncode != 0, args
+    for args in (("--layout",), (8, 32, "--layout"),
+                 ("--layout", "unknown", 8, 32), ("--flat", 8, 32),
+                 ("--layout", "flat", "--layout", "pointer", 8, 32)):
         assert run(*args).returncode != 0, args
     for data in (b"", b"abc", b"abcde"):
         path.write_bytes(data)
-        assert run(4, 1, path).returncode != 0
+        for layout in ("pointer", "flat"):
+            assert run("--layout", layout, 4, 1, path).returncode != 0
 
-print(f"Python hashlib cross-check passed: {cases} trees, synthetic input, CLI errors.")
+print(f"Python hashlib cross-check passed: {cases} trees in both layouts, synthetic input, CLI errors.")

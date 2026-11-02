@@ -10,11 +10,20 @@ typedef struct MerkleNode {
     struct MerkleNode *right;
 } MerkleNode;
 
+typedef enum {
+    MERKLE_LAYOUT_POINTER = 0,
+    MERKLE_LAYOUT_FLAT
+} MerkleLayout;
+
 typedef struct {
+    /* root is used only by pointer layout; flat_hashes only by flat layout. */
     MerkleNode *root;
     size_t leaf_count;
     size_t block_size;
     size_t node_count;
+    MerkleLayout layout;
+    /* Packed 32-byte hashes: leaves, successive parent levels, then root. */
+    unsigned char *flat_hashes;
 } MerkleTree;
 
 typedef enum {
@@ -34,6 +43,16 @@ typedef enum {
  * Treat the returned tree and its nodes as read-only until merkle_free(). */
 MerkleStatus merkle_build(const void *data, size_t leaf_count,
                          size_t block_size, MerkleTree **out);
+
+/* Same contract as merkle_build(), with explicit storage selection.
+ * merkle_build() remains the pointer-layout default. Both are single-threaded. */
+MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
+                                     size_t block_size, MerkleLayout layout,
+                                     MerkleTree **out);
+
+/* Read-only 32-byte root digest for either layout, valid until merkle_free().
+ * Returns NULL if tree is NULL. */
+const unsigned char *merkle_root_hash(const MerkleTree *tree);
 
 /* Accepts NULL. Frees all nodes and the tree wrapper. */
 void merkle_free(MerkleTree *tree);

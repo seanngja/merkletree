@@ -72,6 +72,30 @@ int main(void)
         CHECK(tree->leaf_count == leaves && tree->block_size == 65);
         CHECK(tree->node_count == 2 * leaves - 1);
         CHECK(check_subtree(tree->root, data, leaves, 65) == tree->node_count);
+        CHECK(tree->layout == MERKLE_LAYOUT_POINTER && tree->flat_hashes == NULL);
+        MerkleTree *flat = NULL;
+        CHECK(merkle_build_with_layout(data, leaves, 65, MERKLE_LAYOUT_FLAT,
+                                       &flat) == MERKLE_OK);
+        CHECK(flat->layout == MERKLE_LAYOUT_FLAT && flat->root == NULL);
+        CHECK(flat->leaf_count == leaves && flat->block_size == 65);
+        CHECK(flat->node_count == tree->node_count);
+        CHECK(memcmp(merkle_root_hash(flat), merkle_root_hash(tree),
+                     SHA256_DIGEST_BYTES) == 0);
+        /* Compare every stored level with the corresponding pointer nodes. */
+        for (size_t width = leaves, offset = 0; ; offset += width, width /= 2) {
+            for (size_t i = 0; i < width; ++i) {
+                const MerkleNode *node = tree->root;
+                for (size_t bit = width / 2; bit != 0; bit /= 2) {
+                    node = (i & bit) != 0 ? node->right : node->left;
+                }
+                CHECK(memcmp(flat->flat_hashes + (offset + i) * SHA256_DIGEST_BYTES,
+                             node->hash, SHA256_DIGEST_BYTES) == 0);
+            }
+            if (width == 1) {
+                break;
+            }
+        }
+        merkle_free(flat);
         merkle_free(tree);
     }
     MerkleTree *original = NULL, *modified = NULL, *repeated = NULL;
@@ -90,6 +114,28 @@ int main(void)
 
     MerkleTree *bad = NULL;
     CHECK(merkle_build(NULL, 1, 1, &bad) == MERKLE_INVALID_ARGUMENT);
+    CHECK(bad == NULL);
+    CHECK(merkle_root_hash(NULL) == NULL);
+    CHECK(merkle_build_with_layout(data, 1, 1, (MerkleLayout)99, &bad)
+          == MERKLE_INVALID_ARGUMENT);
+    CHECK(bad == NULL);
+    CHECK(merkle_build_with_layout(NULL, 1, 1, MERKLE_LAYOUT_FLAT, &bad)
+          == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_build_with_layout(data, 0, 1, MERKLE_LAYOUT_FLAT, &bad)
+          == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_build_with_layout(data, 3, 1, MERKLE_LAYOUT_FLAT, &bad)
+          == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_build_with_layout(data, 1, 0, MERKLE_LAYOUT_FLAT, &bad)
+          == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_build_with_layout(data, 1, 1, MERKLE_LAYOUT_FLAT, NULL)
+          == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_build_with_layout(data, 2, SIZE_MAX, MERKLE_LAYOUT_FLAT, &bad)
+          == MERKLE_SIZE_OVERFLOW);
+    CHECK(merkle_build_with_layout(data, SIZE_MAX / 2 + 1, 1,
+                                   MERKLE_LAYOUT_FLAT, &bad) == MERKLE_SIZE_OVERFLOW);
+    /* Total nodes fit size_t, but their contiguous byte storage does not. */
+    CHECK(merkle_build_with_layout(data, SIZE_MAX / 32 + 1, 1,
+                                   MERKLE_LAYOUT_FLAT, &bad) == MERKLE_SIZE_OVERFLOW);
     CHECK(bad == NULL);
     CHECK(merkle_build(data, 0, 1, &bad) == MERKLE_INVALID_ARGUMENT);
     CHECK(merkle_build(data, 3, 1, &bad) == MERKLE_INVALID_ARGUMENT);
