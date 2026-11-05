@@ -58,4 +58,36 @@ const unsigned char *merkle_root_hash(const MerkleTree *tree);
 void merkle_free(MerkleTree *tree);
 const char *merkle_status_string(MerkleStatus status);
 
+
+/* Proof data structures */
+typedef enum {
+    MERKLE_SIBLING_LEFT = 0,
+    MERKLE_SIBLING_RIGHT = 1
+} MerkleSiblingSide;
+
+typedef struct {
+    unsigned char hash[SHA256_DIGEST_BYTES];
+    MerkleSiblingSide side;
+} MerkleProofStep;
+
+typedef struct {
+    size_t leaf_index;
+    size_t depth;               // depth h = log2(N)
+    MerkleProofStep *steps;     // Array of h sibling steps
+} MerkleProof;
+
+/* Generate an inclusion proof for leaf_index in [0, tree->leaf_count - 1].
+ * Returns MERKLE_OK and allocates *proof_out on success. */
+MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index, 
+                                   MerkleProof **proof_out);
+
+/* Verifies that block hashes along the proof path to expected_root.
+ * Returns 1 if valid, 0 if invalid, -1 if argument/hash error. */
+int merkle_proof_verify(const void *block, size_t block_size, 
+                        const unsigned char expected_root[SHA256_DIGEST_BYTES], 
+                        const MerkleProof *proof);
+
+/* Frees a previously generated proof. Accepts NULL. */
+void merkle_proof_free(MerkleProof *proof);
+
 #endif

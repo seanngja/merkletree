@@ -207,3 +207,136 @@ const char *merkle_status_string(MerkleStatus status)
     default: return "unknown error";
     }
 }
+
+
+static size_t compute_tree_depth(size_t leaf_count)
+{
+    size_t depth = 0;
+    while (leaf_count > 1) {
+        ++depth;
+        leaf_count >>= 1;
+    }
+    return depth;
+}
+
+void merkle_proof_free(MerkleProof *proof)
+{
+    if (proof != NULL) {
+        free(proof->steps);
+        free(proof);
+    }
+}
+
+MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index, 
+                                   MerkleProof **proof_out)
+{
+    if (tree == NULL || proof_out || leaf_index >= tree->leaf_count) {
+        return MERKLE_INVALID_ARGUMENT;
+    }
+
+    *proof_out = NULL;
+    size_t depth = compute_tree_depth(tree->leaf_count);
+    MerkleProof *proof = malloc(sizeof(*proof));
+    if (proof == NULL) {
+        return MERKLE_OUT_OF_MEMORY;
+    }
+    
+    proof->leaf_index = leaf_index;
+    proof->depth = depth;
+    proof->steps = NULL;
+
+    if (depth > 0) {
+        proof->steps = malloc(depth * sizeof(*proof->steps));
+        if (proof->steps == NULL) {
+            return MERKLE_OUT_OF_MEMORY;
+        }
+    }
+
+    if (tree->layout == MERKLE_LAYOUT_FLAT) {
+        size_t level_offset = 0;
+        size_t level_width = tree->leaf_count;
+        size_t current_idx = leaf_index;
+        for (size_t d = 0; d < depth; ++d) {
+            // Sibling is the adjacent index, flip LSB
+            size_t sibling_idx = current_idx ^ 1;
+            size_t flat_idx = level_offset + sibling_idx;
+            memcpy(proof->steps[d].hash,
+                   tree->flat_hashes + flat_idx * SHA256_DIGEST_BYTES,
+                   SHA256_DIGEST_BYTES);
+            
+            // If current index is odd, sibling is left, else right
+            proof->steps[d].side = (current_idx & 1) ? MERKLE_SIBLING_LEFT
+                                                     : MERKLE_SIBLING_RIGHT;
+
+            level_offset += level_width;
+            level_width /= 2;
+            current_idx /= 2;
+        }
+    } else {
+        // Pointer layout: traverse down from root using binary search on bits
+        const MerkleNode *curr = tree->root;
+        for (size_t d = 0; d < depth; ++d) {
+            // Path bit at depth d from root: MSB down to LSB
+            size_t bit_shift = depth - 1 - d;
+            int go_right = (int)((leaf_index >> bit_shift) & 1);
+
+            // In proof, steps[0] is leaf level, steps[depth-1] is near root
+            size_t step_idx = bit_shift;
+            if (go_right) {
+                // Target went right, left child is sibling
+                memcpy(proof->steps[step_idx].hash,
+                       curr->left->hash,
+                       SHA256_DIGEST_BYTES);
+                proof->steps[step_idx].side = MERKLE_SIBLING_LEFT;
+                curr = curr->right;
+            } else {
+                // Target went left, right child is sibling
+                memcpy(proof->steps[step_idx].hash,
+                       curr->right->hash,
+                       SHA256_DIGEST_BYTES);
+                proof->steps[step_idx].side = MERKLE_SIBLING_RIGHT;
+                curr = curr->left;
+            }
+        }
+    }
+
+    *proof_out = proof;
+    return MERKLE_OK;
+}
+
+int merkle_proof_verify(const void *block, size_t block_size, 
+                        const unsigned char expected_root[SHA256_DIGEST_BYTES], 
+                        const MerkleProof *proof)
+{
+    if (proof == NULL || expected_root == NULL || (block == NULL && block_size != 0)) {
+        return -1;
+    }
+
+    unsigned char current_hash[SHA256_DIGEST_BYTES];
+    // Hash raw leaf block to get starting hash
+    if (sha256_digest(block, block_size, current_hash) != 0) {
+        return -1;
+    }
+
+    unsigned char buffer[2 * SHA256_DIGEST_BYTES];
+    for (size_t d = 0; d < proof->depth; ++d) {
+        if (proof->steps[d].side == MERKLE_SIBLING_LEFT) {
+            // Sibling || Current
+            memcpy(buffer, proof->steps[d].hash, SHA256_DIGEST_BYTES);
+            memcpy(buffer + SHA256_DIGEST_BYTES, current_hash, SHA256_DIGEST_BYTES);
+        } else if (proof->steps[d].side == MERKLE_SIBLING_RIGHT) {
+            // Current || Sibling
+            memcpy(buffer, current_hash, SHA256_DIGEST_BYTES);
+            memcpy(buffer + SHA256_DIGEST_BYTES, proof->steps[d].hash, SHA256_DIGEST_BYTES);
+        } else {
+            return -1;
+        }
+
+        if (sha256_digest(buffer, sizeof(buffer), current_hash) != 0) {
+            return -1;
+        }
+    }
+
+    // Verify if recomputed root matches expected root
+    return (memcmp(current_hash, expected_root, SHA256_DIGEST_BYTES) == 0) ? 1 : 0;
+}
