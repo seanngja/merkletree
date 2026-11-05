@@ -1,5 +1,4 @@
 *.docx
 build/
 build-sanitize/
-.deps/
 __pycache__/

@@ -62,6 +62,29 @@ int main(void)
         "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
     free(million);
 
+    /* Streaming in uneven chunks must match the one-shot digest for lengths
+     * straddling the 55/56/64-byte padding boundaries. */
+    unsigned char stream_data[300];
+    for (size_t i = 0; i < sizeof(stream_data); ++i) {
+        stream_data[i] = (unsigned char)(i * 131 + 7);
+    }
+    for (size_t length = 0; length <= sizeof(stream_data); ++length) {
+        unsigned char one_shot[SHA256_DIGEST_BYTES];
+        CHECK(sha256_digest(stream_data, length, one_shot) == 0);
+        for (size_t chunk = 1; chunk <= 70; chunk += 23) {
+            Sha256Context ctx;
+            sha256_init(&ctx);
+            for (size_t done = 0; done < length;) {
+                size_t take = length - done < chunk ? length - done : chunk;
+                CHECK(sha256_update(&ctx, stream_data + done, take) == 0);
+                done += take;
+            }
+            unsigned char streamed[SHA256_DIGEST_BYTES];
+            CHECK(sha256_final(&ctx, streamed) == 0);
+            CHECK(memcmp(one_shot, streamed, sizeof(one_shot)) == 0);
+        }
+    }
+
     unsigned char data[16 * 65];
     for (size_t i = 0; i < sizeof(data); ++i) {
         data[i] = (unsigned char)(i * 37 + i / 7);

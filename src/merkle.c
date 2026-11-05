@@ -203,7 +203,7 @@ const char *merkle_status_string(MerkleStatus status)
         return "invalid argument (check layout, power-of-two leaf count and nonzero block size)";
     case MERKLE_SIZE_OVERFLOW: return "requested size exceeds supported limits";
     case MERKLE_OUT_OF_MEMORY: return "memory allocation failed";
-    case MERKLE_HASH_ERROR: return "OpenSSL SHA-256 hashing failed";
+    case MERKLE_HASH_ERROR: return "SHA-256 hashing failed";
     default: return "unknown error";
     }
 }

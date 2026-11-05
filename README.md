@@ -2,25 +2,14 @@
 
 This implements versions A and B: single-threaded binary Merkle trees in
 C17 with selectable pointer-based or contiguous flat storage. Both use the
-same OpenSSL SHA-256 primitive and tree semantics.
+same SHA-256 primitive and tree semantics.
 
 ## Build and run
 
-Requires a C17 compiler, Make and OpenSSL development headers/libraries
-on a POSIX system. On Ubuntu/Debian, install the dependency with:
-
-```sh
-sudo apt-get install libssl-dev
-```
-
-The build links OpenSSL's crypto library with `-lcrypto`.
-It also detects development files extracted under `.deps/usr`; that
-directory is ignored by version control. This workspace uses local headers
-from `libssl-dev` 3.0.13-0ubuntu3.16 and the matching installed system
-`libcrypto.so.3`. The local library directory contains a symlink to that
-runtime. A system-wide development package is therefore unnecessary here.
-On another machine, install `libssl-dev` as above, or supply a complete
-development prefix with `make OPENSSL_PREFIX=/path/to/openssl`.
+Requires only a C17 compiler and Make. There are no external library
+dependencies: SHA-256 is implemented in `src/sha256.c`, so the program
+builds and produces identical roots on any platform with a hosted C17
+toolchain (little- or big-endian, 32- or 64-bit).
 
 ```sh
 make
@@ -99,7 +88,7 @@ merkle_free(tree);
 for pointer trees; flat trees use `tree->flat_hashes`, with the root stored
 last. Both constructors leave the input buffer owned by the caller and do
 not retain it. Call `merkle_free()` to release either representation. Partial trees are also freed if an allocation or
-OpenSSL hashing operation fails.
+hashing operation fails.
 Pointer cleanup uses recursion with depth proportional to log2(N); flat
 cleanup frees its one hash buffer.
 
@@ -109,18 +98,23 @@ cleanup frees its one hash buffer.
 | --- | --- |
 | `include/merkle.h` | Public node/tree types, construction and cleanup API |
 | `src/merkle.c` | Sequential leaf hashing, level reduction and ownership |
-| `src/sha256.c` | Small wrapper around OpenSSL's EVP SHA-256 interface |
+| `src/sha256.c` | Self-contained portable SHA-256 (one-shot and streaming) |
 | `src/main.c` | Synthetic/file input, single-build timing and root output |
 | `tests/` | Hash vectors, structure checks, allocation failures and independent roots |
 
-SHA-256 is provided by OpenSSL through
-[`EVP_Digest()` and `EVP_sha256()`](https://docs.openssl.org/3.0/man3/EVP_DigestInit/).
-There is no handwritten SHA-256 algorithm in this project. Tree construction
-remains single-threaded; OpenSSL can use CPU-specific hash acceleration.
-Use the same OpenSSL version/configuration and compiler settings across
-variants when comparing memory layout or threading. Record `openssl version`
-with benchmark results. Python `hashlib` provides a separate tree oracle,
-although it may use the same underlying OpenSSL library.
+SHA-256 is a handwritten implementation of
+[FIPS 180-4](https://csrc.nist.gov/pubs/fips/180-4/upd1/final) in plain C17.
+It packs words from bytes explicitly in big-endian order, never performs
+unaligned or type-punned loads, and uses no intrinsics, inline assembly or
+CPU-specific acceleration, so its output does not depend on host endianness,
+alignment rules or library versions. Besides `sha256_digest()`, the header
+exposes a streaming `sha256_init()`/`sha256_update()`/`sha256_final()` API.
+
+Because hashing is plain portable C, its speed depends only on the compiler
+and flags. Use the same compiler and settings across variants when comparing
+memory layout or threading, and record them with benchmark results. Python
+`hashlib` (backed by an unrelated implementation) acts as an independent
+tree oracle.
 
 ## Validation
 
@@ -134,11 +128,11 @@ Tests require Python 3; allocation/hash-failure tests use GNU-compatible linker
 and UndefinedBehaviorSanitizer flags in a separate build directory.
 
 Tests cover known SHA-256 vectors (including the empty message and one
-million `a` bytes), one/two/many-leaf trees, repeated leaves, changed input,
+million `a` bytes), streaming in uneven chunks versus one-shot hashing,
+one/two/many-leaf trees, repeated leaves, changed input,
 ordering, block sizes around SHA-256 padding boundaries, invalid inputs,
 overflow checks, exact level ordering in flat storage, and every tree
-allocation and hash failure in a 16-leaf construction for both layouts. Failure injection covers the tree's cleanup paths, not
-OpenSSL's internal allocations.
+allocation and hash failure in a 16-leaf construction for both layouts. Failure injection covers the tree's cleanup paths.
 An independent Python implementation compares complete tree roots using
 `hashlib.sha256`.
 
@@ -149,8 +143,7 @@ clock. It includes tree/workspace allocation, hashing, tree writes and
 workspace release. It excludes input allocation/generation/file reading,
 printing and final tree destruction. This is a smoke measurement, not the
 proposal's full benchmark study; use warmups and repeated measurements
-before reporting performance. The first build can also include OpenSSL's
-lazy initialisation cost.
+before reporting performance.
 
 The output identifies `variant=sequential_pointer` or `variant=sequential_flat`.
 For pointer layout, `node_storage_bytes` is `(2N - 1) * sizeof(MerkleNode)`

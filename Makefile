@@ -4,15 +4,7 @@ BUILD ?= build
 CPPFLAGS += -Iinclude
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow
-LDLIBS += -lcrypto
-
-# Optional local development package; otherwise use system OpenSSL headers/libs.
-OPENSSL_PREFIX ?= $(if $(wildcard .deps/usr/include/openssl/evp.h),$(CURDIR)/.deps/usr)
-ifneq ($(strip $(OPENSSL_PREFIX)),)
-MULTIARCH := $(shell $(CC) -dumpmachine)
-CPPFLAGS += -I"$(OPENSSL_PREFIX)/include" -I"$(OPENSSL_PREFIX)/include/$(MULTIARCH)"
-OPENSSL_LDFLAGS = -L"$(OPENSSL_PREFIX)/lib/$(MULTIARCH)" -L"$(OPENSSL_PREFIX)/lib"
-endif
+# SHA-256 is implemented in src/sha256.c; no external crypto library is needed.
 
 LIB_OBJECTS = $(BUILD)/merkle.o $(BUILD)/sha256.o
 
@@ -26,14 +18,14 @@ $(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD)/merkle_baseline: $(BUILD)/main.o $(LIB_OBJECTS)
-	$(CC) $(LDFLAGS) $(OPENSSL_LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(BUILD)/test_merkle: tests/test_merkle.c $(LIB_OBJECTS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(OPENSSL_LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # GNU-compatible linker wrappers inject allocation and hashing failures.
 $(BUILD)/test_alloc: tests/test_alloc.c $(LIB_OBJECTS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(OPENSSL_LDFLAGS) $^ \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ \
 		-Wl,--wrap=malloc -Wl,--wrap=free -Wl,--wrap=sha256_digest $(LDLIBS) -o $@
 
 test: $(BUILD)/merkle_baseline $(BUILD)/test_merkle $(BUILD)/test_alloc
