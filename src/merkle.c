@@ -230,7 +230,7 @@ void merkle_proof_free(MerkleProof *proof)
 MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index, 
                                    MerkleProof **proof_out)
 {
-    if (tree == NULL || proof_out || leaf_index >= tree->leaf_count) {
+    if (tree == NULL || proof_out == NULL || leaf_index >= tree->leaf_count) {
         return MERKLE_INVALID_ARGUMENT;
     }
 
@@ -248,6 +248,7 @@ MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index,
     if (depth > 0) {
         proof->steps = malloc(depth * sizeof(*proof->steps));
         if (proof->steps == NULL) {
+            free(proof);
             return MERKLE_OUT_OF_MEMORY;
         }
     }
