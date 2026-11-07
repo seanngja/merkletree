@@ -5,6 +5,9 @@ CPPFLAGS += -Iinclude
 CFLAGS ?= -O2 -g
 CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 # SHA-256 is implemented in src/sha256.c; no external crypto library is needed.
+# Kept separate from CFLAGS so `make sanitize` (which overrides CFLAGS) keeps it.
+# Build with OPENMP= to compile the parallel builder as single-threaded code.
+OPENMP ?= -fopenmp
 
 LIB_OBJECTS = $(BUILD)/merkle.o $(BUILD)/sha256.o
 
@@ -15,17 +18,17 @@ $(BUILD):
 	mkdir -p $@
 
 $(BUILD)/%.o: src/%.c | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPENMP) -MMD -MP -c $< -o $@
 
 $(BUILD)/merkle_baseline: $(BUILD)/main.o $(LIB_OBJECTS)
-	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(BUILD)/test_merkle: tests/test_merkle.c $(LIB_OBJECTS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # GNU-compatible linker wrappers inject allocation and hashing failures.
 $(BUILD)/test_alloc: tests/test_alloc.c $(LIB_OBJECTS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ \
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPENMP) $(LDFLAGS) $^ \
 		-Wl,--wrap=malloc -Wl,--wrap=free -Wl,--wrap=sha256_digest $(LDLIBS) -o $@
 
 test: $(BUILD)/merkle_baseline $(BUILD)/test_merkle $(BUILD)/test_alloc

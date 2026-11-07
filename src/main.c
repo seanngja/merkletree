@@ -62,6 +62,7 @@ int main(int argc, char **argv)
     const char *positional[3];
     size_t positional_count = 0;
     int layout_seen = 0, options_done = 0;
+    int threads = -1; /* -1: sequential builder; >= 1: parallel flat builder */
     for (int i = 1; i < argc; ++i) {
         if (!options_done && strcmp(argv[i], "--") == 0) {
             options_done = 1;
@@ -77,6 +78,14 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Unknown layout: %s (use pointer or flat).\n", argv[i]);
                 return EXIT_FAILURE;
             }
+        } else if (!options_done && strcmp(argv[i], "--threads") == 0) {
+            size_t parsed;
+            if (threads != -1 || ++i == argc || parse_size(argv[i], &parsed) != 0
+                || parsed > 4096) {
+                fprintf(stderr, "Specify --threads N once, with 1 <= N <= 4096.\n");
+                return EXIT_FAILURE;
+            }
+            threads = (int)parsed;
         } else if ((!options_done && strncmp(argv[i], "--", 2) == 0)
                    || positional_count == 3) {
             fprintf(stderr, "Unexpected argument: %s\n", argv[i]);
@@ -90,8 +99,9 @@ int main(int argc, char **argv)
         || parse_size(positional[0], &leaves) != 0
         || parse_size(positional[1], &block_size) != 0
         || (leaves & (leaves - 1)) != 0) {
-        fprintf(stderr, "Usage: %s [--layout pointer|flat] LEAVES BLOCK_BYTES [INPUT_FILE]\n"
-                "Layout defaults to pointer. Both layouts are single-threaded.\n"
+        fprintf(stderr, "Usage: %s [--layout pointer|flat] [--threads N] LEAVES BLOCK_BYTES [INPUT_FILE]\n"
+                "Layout defaults to pointer; without --threads both are single-threaded.\n"
+                "--threads N uses the parallel OpenMP builder for the chosen layout.\n"
                 "LEAVES must be a power of two; BLOCK_BYTES must be positive.\n"
                 "Without INPUT_FILE, uses deterministic synthetic bytes.\n", argv[0]);
         return EXIT_FAILURE;
@@ -126,8 +136,9 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     MerkleTree *tree = NULL;
-    MerkleStatus status = merkle_build_with_layout(data, leaves, block_size,
-                                                  layout, &tree);
+    MerkleStatus status = threads == -1
+        ? merkle_build_with_layout(data, leaves, block_size, layout, &tree)
+        : merkle_build_parallel(data, leaves, block_size, layout, threads, &tree);
     if (clock_gettime(CLOCK_MONOTONIC, &finish) != 0) {
         perror("clock_gettime");
         merkle_free(tree);
@@ -141,12 +152,17 @@ int main(int argc, char **argv)
     }
     double seconds = (double)(finish.tv_sec - start.tv_sec)
                    + (double)(finish.tv_nsec - start.tv_nsec) / 1e9;
-    printf("variant=sequential_%s\n", layout == MERKLE_LAYOUT_FLAT ? "flat" : "pointer");
+    printf("variant=%s_%s\n", threads == -1 ? "sequential" : "parallel",
+           layout == MERKLE_LAYOUT_FLAT ? "flat" : "pointer");
+    printf("threads=%zu\n", tree->build_threads);
     printf("leaves=%zu\nblock_bytes=%zu\nnodes=%zu\n",
            tree->leaf_count, tree->block_size, tree->node_count);
     printf("node_storage_bytes=%zu\n", tree->node_count * node_size);
+    /* Parallel pointer builds double-buffer levels: N + N/2 pointers. */
+    size_t workspace_pointers = layout == MERKLE_LAYOUT_FLAT ? 0
+                              : threads == -1 ? leaves : leaves + leaves / 2;
     printf("temporary_pointer_bytes=%zu\n",
-           layout == MERKLE_LAYOUT_FLAT ? (size_t)0 : leaves * sizeof(MerkleNode *));
+           workspace_pointers * sizeof(MerkleNode *));
     printf("build_seconds=%.9f\nroot=", seconds);
     const unsigned char *root = merkle_root_hash(tree);
     for (size_t i = 0; i < SHA256_DIGEST_BYTES; ++i) {
