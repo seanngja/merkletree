@@ -24,6 +24,8 @@ typedef struct {
     MerkleLayout layout;
     /* Packed 32-byte hashes: leaves, successive parent levels, then root. */
     unsigned char *flat_hashes;
+    /* Threads that built the tree: 1 for sequential builders. */
+    size_t build_threads;
 } MerkleTree;
 
 typedef enum {
@@ -49,6 +51,18 @@ MerkleStatus merkle_build(const void *data, size_t leaf_count,
 MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
                                      size_t block_size, MerkleLayout layout,
                                      MerkleTree **out);
+
+/* Parallel build using an OpenMP thread team, for either layout.
+ * Same contract as merkle_build_with_layout() and produces an identical tree
+ * (byte-identical flat_hashes, or the same pointer structure and hashes).
+ * num_threads == 0 uses the OpenMP default (OMP_NUM_THREADS / core count);
+ * negative values are invalid. Levels are separated by barriers; pointer
+ * trees use two swapping workspace arrays (N + N/2 pointers) during the build.
+ * See src/merkle.c for the scheme.
+ * Built without OpenMP, this runs on one thread and reports build_threads 1. */
+MerkleStatus merkle_build_parallel(const void *data, size_t leaf_count,
+                                   size_t block_size, MerkleLayout layout,
+                                   int num_threads, MerkleTree **out);
 
 /* Read-only 32-byte root digest for either layout, valid until merkle_free().
  * Returns NULL if tree is NULL. */

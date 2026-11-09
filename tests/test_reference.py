@@ -39,7 +39,15 @@ def check(data, leaves, block_size, path):
         if layout == "flat":
             assert int(fields["node_storage_bytes"]) == (2 * leaves - 1) * 32
             assert int(fields["temporary_pointer_bytes"]) == 0
-
+    for layout in ("pointer", "flat"):
+        for threads in (1, 2, 3, 8):
+            result = run("--layout", layout, "--threads", threads,
+                         leaves, block_size, path)
+            assert result.returncode == 0, result.stderr
+            fields = dict(line.split("=", 1) for line in result.stdout.splitlines())
+            assert fields["variant"] == f"parallel_{layout}"
+            assert int(fields["threads"]) == threads
+            assert fields["root"] == expected, (layout, threads, leaves, block_size)
 
 executable = Path(sys.argv[1]).resolve()
 rng = random.Random(5206)
@@ -78,6 +86,10 @@ with tempfile.TemporaryDirectory(prefix="merkle-tests-") as directory:
                  ("18446744073709551616", "1"), ("1", "32", path / "missing")):
         for prefix in ((), ("--layout", "flat")):
             assert run(*prefix, *args).returncode != 0, args
+    for layout in ("pointer", "flat"):
+        result = run("--layout", layout, "--threads", "2", 8, 32)
+        assert result.returncode == 0, result.stderr
+        assert f"root={reference(data, 32)}" in result.stdout
     for args in (("--layout",), (8, 32, "--layout"),
                  ("--layout", "unknown", 8, 32), ("--flat", 8, 32),
                  ("--layout", "flat", "--layout", "pointer", 8, 32)):

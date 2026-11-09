@@ -147,6 +147,79 @@ static void test_merkle_proofs(void)
     }
 }
 
+/* The parallel builders must reproduce every node of the sequential builds
+ * for every thread count, including more threads than parents. */
+static void test_parallel_build(void)
+{
+    const size_t block_size = 33;
+    const size_t max_leaves = 4096;
+    unsigned char *data = malloc(max_leaves * block_size);
+    CHECK(data != NULL);
+    for (size_t i = 0; i < max_leaves * block_size; ++i) {
+        data[i] = (unsigned char)(i * 2654435761u >> 13);
+    }
+    const int thread_counts[] = {0, 1, 2, 3, 4, 7, 8, 16, 33};
+    for (size_t leaves = 1; leaves <= max_leaves; leaves *= 2) {
+        MerkleTree *sequential = NULL;
+        CHECK(merkle_build_with_layout(data, leaves, block_size,
+                                       MERKLE_LAYOUT_FLAT, &sequential) == MERKLE_OK);
+        CHECK(sequential->build_threads == 1);
+        for (size_t t = 0; t < sizeof(thread_counts) / sizeof(thread_counts[0]); ++t) {
+            MerkleTree *parallel = NULL;
+            CHECK(merkle_build_parallel(data, leaves, block_size, MERKLE_LAYOUT_FLAT,
+                                        thread_counts[t], &parallel) == MERKLE_OK);
+            CHECK(parallel->layout == MERKLE_LAYOUT_FLAT && parallel->root == NULL);
+            CHECK(parallel->leaf_count == leaves && parallel->block_size == block_size);
+            CHECK(parallel->node_count == sequential->node_count);
+            CHECK(parallel->build_threads >= 1);
+            CHECK(memcmp(parallel->flat_hashes, sequential->flat_hashes,
+                         sequential->node_count * SHA256_DIGEST_BYTES) == 0);
+            if (leaves == 64 && thread_counts[t] == 4) {
+                run_proof_test_cases(parallel, data, block_size);
+            }
+            merkle_free(parallel);
+
+            /* Pointer layout: full structural check against the input. */
+            MerkleTree *ptr = NULL;
+            CHECK(merkle_build_parallel(data, leaves, block_size,
+                                        MERKLE_LAYOUT_POINTER, thread_counts[t],
+                                        &ptr) == MERKLE_OK);
+            CHECK(ptr->layout == MERKLE_LAYOUT_POINTER && ptr->flat_hashes == NULL);
+            CHECK(ptr->leaf_count == leaves && ptr->node_count == 2 * leaves - 1);
+            CHECK(ptr->build_threads >= 1);
+            CHECK(check_subtree(ptr->root, data, leaves, block_size)
+                  == ptr->node_count);
+            CHECK(memcmp(merkle_root_hash(ptr), merkle_root_hash(sequential),
+                         SHA256_DIGEST_BYTES) == 0);
+            if (leaves == 64 && thread_counts[t] == 4) {
+                run_proof_test_cases(ptr, data, block_size);
+            }
+            merkle_free(ptr);
+        }
+        merkle_free(sequential);
+    }
+    MerkleTree *bad = NULL;
+    const MerkleLayout layouts[] = {MERKLE_LAYOUT_POINTER, MERKLE_LAYOUT_FLAT};
+    for (size_t l = 0; l < 2; ++l) {
+        const MerkleLayout layout = layouts[l];
+        CHECK(merkle_build_parallel(data, 4, block_size, layout, -1, &bad)
+              == MERKLE_INVALID_ARGUMENT && bad == NULL);
+        CHECK(merkle_build_parallel(NULL, 4, block_size, layout, 2, &bad)
+              == MERKLE_INVALID_ARGUMENT && bad == NULL);
+        CHECK(merkle_build_parallel(data, 3, block_size, layout, 2, &bad)
+              == MERKLE_INVALID_ARGUMENT && bad == NULL);
+        CHECK(merkle_build_parallel(data, 4, 0, layout, 2, &bad)
+              == MERKLE_INVALID_ARGUMENT);
+        CHECK(merkle_build_parallel(data, 4, block_size, layout, 2, NULL)
+              == MERKLE_INVALID_ARGUMENT);
+        CHECK(merkle_build_parallel(data, 2, SIZE_MAX, layout, 2, &bad)
+              == MERKLE_SIZE_OVERFLOW);
+    }
+    CHECK(merkle_build_parallel(data, 4, block_size, (MerkleLayout)99, 2, &bad)
+          == MERKLE_INVALID_ARGUMENT && bad == NULL);
+    free(data);
+}
+
 int main(void)
 {
     check_hash(NULL, 0,
@@ -276,6 +349,7 @@ int main(void)
     }
 
     test_merkle_proofs();
+    test_parallel_build();
 
     puts("C tests passed: SHA-256 vectors, tree structure, mutations, invalid inputs, proof generation, single verification.");
     return EXIT_SUCCESS;

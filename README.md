@@ -1,12 +1,13 @@
-# Sequential Merkle trees in C
+# Sequential and parallel Merkle trees in C
 
-This implements versions A and B: single-threaded binary Merkle trees in
-C17 with selectable pointer-based or contiguous flat storage. Both use the
-same SHA-256 primitive and tree semantics.
+This implements single-threaded binary Merkle trees in C17 with selectable
+pointer-based or contiguous flat storage, plus an OpenMP parallel builder
+for both layouts. All variants use the same SHA-256 primitive and tree
+semantics and produce byte-identical hashes.
 
 ## Build and run
 
-Requires only a C17 compiler and Make. There are no external library
+Requires a C17 compiler with OpenMP (GCC/Clang `-fopenmp`) and Make. There are no other external library
 dependencies: SHA-256 is implemented in `src/sha256.c`, so the program
 builds and produces identical roots on any platform with a hosted C17
 toolchain (little- or big-endian, 32- or 64-bit).
@@ -16,7 +17,13 @@ make
 ./build/merkle_baseline 1024 256                         # default: pointer
 ./build/merkle_baseline --layout pointer 1024 256
 ./build/merkle_baseline --layout flat 1024 256
+./build/merkle_baseline --threads 8 1048576 256                 # parallel pointer
+./build/merkle_baseline --layout flat --threads 8 1048576 256   # parallel flat
 ```
+
+`--threads N` selects the parallel builder for the chosen layout
+(`variant=parallel_pointer` or `variant=parallel_flat`). `make OPENMP=` builds
+without OpenMP; the parallel builder then runs on one thread.
 
 Use `--layout pointer` or `--layout flat` to select storage without rebuilding.
 The option can appear before or after the positional arguments.
@@ -92,12 +99,69 @@ hashing operation fails.
 Pointer cleanup uses recursion with depth proportional to log2(N); flat
 cleanup frees its one hash buffer.
 
+## Parallel construction (OpenMP)
+
+`merkle_build_parallel(data, N, block_size, layout, threads, &tree)` builds
+the same tree as `merkle_build_with_layout()` for either layout.
+`threads == 0` uses the OpenMP default (`OMP_NUM_THREADS`).
+
+OpenMP rather than MPI: the workload runs on one shared-memory CPU, and every
+level reads the hashes the previous level wrote. With threads, those reads are
+plain loads from the shared `flat_hashes` buffer. MPI processes have separate
+address spaces, so boundary hashes would have to be sent between ranks at each
+level and the tree gathered at the end. That communication only pays off when
+the data is spread across several machines, and the proposal requires
+OpenMP, pthreads or C++ threads.
+
+Dependencies and synchronisation:
+
+- Nodes within one level are independent; node `i` of level k+1 reads only
+  nodes `2i` and `2i+1` of level k.
+- A single thread team is created for the whole build. Each level is an
+  `omp for schedule(static)` loop, and the **implicit barrier at the end of
+  each loop** is the level barrier: no thread starts level k+1 until all
+  threads have written and flushed level k. That gives log2(N) + 1 barriers
+  in total, with no locks or per-node atomics.
+- Static scheduling gives each thread a contiguous, disjoint output range,
+  so no node is written by two threads (threads can share at most one cache
+  line where their ranges meet).
+- Available work halves at each level. Once a level has fewer than
+  `4 * threads` parents (`MERKLE_MIN_PARENTS_PER_THREAD`), a barrier costs
+  more than the hashing it separates. The remaining top levels then run on
+  one thread inside `omp single`, which needs no barrier between levels.
+- A hash failure sets a shared flag (atomic write). Threads cannot leave a
+  worksharing loop early, and all threads must reach the same barriers, so
+  the remaining iterations are skipped. The build then returns
+  `MERKLE_HASH_ERROR` and frees everything.
+
+Pointer layout: the sequential builder reuses one pointer array in place
+(`level[i] = parent`). That is only safe because one thread visits `i` in
+increasing order, so a slot is overwritten only after it has been read for the
+last time. In parallel, a thread writing `level[2]` could overwrite a child
+that another thread has yet to read. The parallel pointer builder therefore
+double-buffers: each level reads `cur` and writes `next`, and after the level
+barrier the arrays swap. Each thread swaps its own private copies of the two
+pointers in the same order, so the swap needs no extra barrier. The workspace
+is N + N/2 pointers (`temporary_pointer_bytes`).
+
+Ownership during a pointer build: every live subtree is owned by exactly one
+array slot. A successful parent takes its children and clears their `cur`
+slots. On failure, `next[i]` stays NULL and the children remain in `cur`.
+Each level records failures in its own status slot, which is written only
+during that level and read only after its barrier. Every thread therefore sees
+the same value and all threads leave the loop together. One thread then frees
+every non-NULL slot in both arrays.
+
+`build_seconds` for the parallel variants includes OpenMP thread-team startup
+on the first parallel region of the process. That dominates small trees in
+single-shot CLI runs, so a benchmark harness should warm up first.
+
 ## Source map
 
 | File | Purpose |
 | --- | --- |
 | `include/merkle.h` | Public node/tree types, construction and cleanup API |
-| `src/merkle.c` | Sequential leaf hashing, level reduction and ownership |
+| `src/merkle.c` | Sequential and OpenMP leaf hashing, level reduction and ownership |
 | `src/sha256.c` | Self-contained portable SHA-256 (one-shot and streaming) |
 | `src/main.c` | Synthetic/file input, single-build timing and root output |
 | `tests/` | Hash vectors, structure checks, allocation failures and independent roots |
@@ -145,9 +209,11 @@ printing and final tree destruction. This is a smoke measurement, not the
 proposal's full benchmark study; use warmups and repeated measurements
 before reporting performance.
 
-The output identifies `variant=sequential_pointer` or `variant=sequential_flat`.
+The output identifies `variant=sequential_pointer`, `variant=sequential_flat`,
+`variant=parallel_pointer` or `variant=parallel_flat`, and `threads` reports the team size actually used.
 For pointer layout, `node_storage_bytes` is `(2N - 1) * sizeof(MerkleNode)`
-and `temporary_pointer_bytes` is `N * sizeof(MerkleNode *)`.
+and `temporary_pointer_bytes` is `N * sizeof(MerkleNode *)` (sequential) or
+`(N + N/2) * sizeof(MerkleNode *)` (parallel, double-buffered).
 For flat layout, these are `(2N - 1) * 32` and `0`, respectively.
 These are requested storage sizes, not measured process memory. They omit
 allocator metadata, the tree wrapper, input buffer and stack. In particular,
