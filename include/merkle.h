@@ -15,6 +15,20 @@ typedef enum {
     MERKLE_LAYOUT_FLAT
 } MerkleLayout;
 
+
+/* Hash table for proof generation using leaf hash directly */
+typedef struct MerkleHashEntry {
+    unsigned char hash[SHA256_DIGEST_BYTES];    // 32-byte key
+    size_t leaf_index;                          // value
+    struct MerkleHashEntry *next;               // collision chaining
+} MerkleHashEntry;
+
+typedef struct MerkleLeafMap {
+    MerkleHashEntry **buckets;
+    size_t bucket_count;
+} MerkleLeafMap;
+
+
 typedef struct {
     /* root is used only by pointer layout; flat_hashes only by flat layout. */
     MerkleNode *root;
@@ -24,6 +38,8 @@ typedef struct {
     MerkleLayout layout;
     /* Packed 32-byte hashes: leaves, successive parent levels, then root. */
     unsigned char *flat_hashes;
+    /* Hash table index */
+    struct MerkleLeafMap *leaf_map;
 } MerkleTree;
 
 typedef enum {
@@ -80,6 +96,11 @@ typedef struct {
  * Returns MERKLE_OK and allocates *proof_out on success. */
 MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index, 
                                    MerkleProof **proof_out);
+
+/* Generate an inclusion proof using leaf hash directly */
+MerkleStatus merkle_proof_generate_hash(const MerkleTree *tree, 
+                                        const unsigned char leaf_hash[SHA256_DIGEST_BYTES],
+                                        MerkleProof **proof_out);
 
 /* Verifies that block hashes along the proof path to expected_root.
  * Returns 1 if valid, 0 if invalid, -1 if argument/hash error. */

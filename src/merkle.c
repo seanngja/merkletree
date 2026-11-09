@@ -4,6 +4,81 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+/* Hash table helpers */
+static inline size_t hash_to_bucket(const unsigned char hash[SHA256_DIGEST_BYTES], size_t bucket_count)
+{
+    uint64_t prefix;
+    memcpy(&prefix, hash, sizeof(prefix));
+    return (size_t)(prefix % bucket_count);
+}
+
+static MerkleLeafMap *leaf_map_create(size_t leaf_count)
+{
+    MerkleLeafMap *map = malloc(sizeof(*map));
+    if (map == NULL) {
+        return NULL;
+    }
+
+    map->bucket_count = leaf_count > 0 ? leaf_count : 1;
+
+    map->buckets = malloc(map->bucket_count * sizeof(MerkleHashEntry *));
+    if (map->buckets == NULL) {
+        free(map);
+        return NULL;
+    }
+    memset(map->buckets, 0, map->bucket_count * sizeof(MerkleHashEntry *));
+    return map;
+}
+
+static int leaf_map_insert(MerkleLeafMap *map, const unsigned char hash[SHA256_DIGEST_BYTES], size_t index)
+{
+    size_t b = hash_to_bucket(hash, map->bucket_count);
+    MerkleHashEntry *entry = malloc(sizeof(*entry));
+    if (entry == NULL) {
+        return -1;
+    }
+
+    memcpy(entry->hash, hash, SHA256_DIGEST_BYTES);
+    entry->leaf_index = index;
+    entry->next = map->buckets[b];
+    map->buckets[b] = entry;
+    return 0;
+}
+
+static int leaf_map_find(const MerkleLeafMap *map, const unsigned char hash[SHA256_DIGEST_BYTES], size_t *out_index)
+{
+    if (map == NULL || map->buckets == NULL) {
+        return 0;
+    }
+    size_t b = hash_to_bucket(hash, map->bucket_count);
+    for (MerkleHashEntry *e = map->buckets[b]; e != NULL; e = e->next) {
+        if (memcmp(e->hash, hash, SHA256_DIGEST_BYTES) == 0) {
+            *out_index = e->leaf_index;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void leaf_map_free(MerkleLeafMap *map)
+{
+    if (map == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < map->bucket_count; ++i) {
+        MerkleHashEntry *curr = map->buckets[i];
+        while (curr != NULL) {
+            MerkleHashEntry *next = curr->next;
+            free(curr);
+            curr = next;
+        }
+    }
+    free(map->buckets);
+    free(map);
+}
+
+
 static void free_node(MerkleNode *node)
 {
     if (node != NULL) {
@@ -16,6 +91,7 @@ static void free_node(MerkleNode *node)
 void merkle_free(MerkleTree *tree)
 {
     if (tree != NULL) {
+        leaf_map_free(tree->leaf_map);
         if (tree->layout == MERKLE_LAYOUT_FLAT) {
             free(tree->flat_hashes);
         } else {
@@ -51,9 +127,14 @@ static MerkleStatus build_flat(const unsigned char *data, MerkleTree *tree)
         return MERKLE_OUT_OF_MEMORY;
     }
     for (size_t i = 0; i < tree->leaf_count; ++i) {
-        if (sha256_digest(data + i * tree->block_size, tree->block_size,
-                          tree->flat_hashes + i * SHA256_DIGEST_BYTES) != 0) {
+        unsigned char *leaf_slot = tree->flat_hashes + i * SHA256_DIGEST_BYTES;
+        if (sha256_digest(data + i * tree->block_size, tree->block_size, leaf_slot) != 0) {
             return MERKLE_HASH_ERROR;
+        }
+        if (tree->leaf_map != NULL) {
+            if (leaf_map_insert(tree->leaf_map, leaf_slot, i) != 0) {
+                return MERKLE_OUT_OF_MEMORY;
+            }
         }
     }
     size_t offset = 0;
@@ -110,6 +191,13 @@ MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
     tree->leaf_count = leaf_count;
     tree->block_size = block_size;
     tree->node_count = node_count;
+
+    tree->leaf_map = leaf_map_create(leaf_count);
+    if (tree->leaf_map == NULL) {
+        free(tree);
+        return MERKLE_OUT_OF_MEMORY;
+    }
+
     if (layout == MERKLE_LAYOUT_FLAT) {
         MerkleStatus status = build_flat(data, tree);
         if (status != MERKLE_OK) {
@@ -123,7 +211,7 @@ MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
      * Each entry owns a disjoint subtree during construction. */
     MerkleNode **level = malloc(leaf_count * sizeof(*level));
     if (level == NULL) {
-        free(tree);
+        merkle_free(tree);
         return MERKLE_OUT_OF_MEMORY;
     }
     const unsigned char *bytes = data;
@@ -134,7 +222,7 @@ MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
                 free_node(level[j]);
             }
             free(level);
-            free(tree);
+            merkle_free(tree);
             return MERKLE_OUT_OF_MEMORY;
         }
         level[i]->left = NULL;
@@ -145,8 +233,17 @@ MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
                 free_node(level[j]);
             }
             free(level);
-            free(tree);
+            merkle_free(tree);
             return MERKLE_HASH_ERROR;
+        }
+        // Insert leaf hash into lookup map
+        if (leaf_map_insert(tree->leaf_map, level[i]->hash, i) != 0) {
+            for (size_t j = 0; j <= i; ++j) {
+                free_node(level[j]);
+            }
+            free(level);
+            merkle_free(tree);
+            return MERKLE_OUT_OF_MEMORY;
         }
     }
 
@@ -163,7 +260,7 @@ MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
                     free_node(level[j]);
                 }
                 free(level);
-                free(tree);
+                merkle_free(tree);
                 return MERKLE_OUT_OF_MEMORY;
             }
             parent->left = level[2 * i];
@@ -182,7 +279,7 @@ MerkleStatus merkle_build_with_layout(const void *data, size_t leaf_count,
                     free_node(level[j]);
                 }
                 free(level);
-                free(tree);
+                merkle_free(tree);
                 return MERKLE_HASH_ERROR;
             }
             /* Overwrite consumed entries; unread children remain intact. */
@@ -340,4 +437,38 @@ int merkle_proof_verify(const void *block, size_t block_size,
 
     // Verify if recomputed root matches expected root
     return (memcmp(current_hash, expected_root, SHA256_DIGEST_BYTES) == 0) ? 1 : 0;
+}
+
+
+MerkleStatus merkle_proof_generate_hash(const MerkleTree *tree,
+                                           const unsigned char leaf_hash[SHA256_DIGEST_BYTES],
+                                           MerkleProof **proof_out)
+{
+    if (tree == NULL || leaf_hash == NULL || proof_out == NULL) {
+        return MERKLE_INVALID_ARGUMENT;
+    }
+    size_t leaf_index = 0;
+    if (tree->leaf_map != NULL) {
+        if (!leaf_map_find(tree->leaf_map, leaf_hash, &leaf_index)) {
+            return MERKLE_INVALID_ARGUMENT; // Hash not found
+        }
+    } else {
+        // Fallback linear scan if map is unbuilt
+        int found = 0;
+        if (tree->layout == MERKLE_LAYOUT_FLAT) {
+            for (size_t i = 0; i < tree->leaf_count; ++i) {
+                if (memcmp(tree->flat_hashes + i * SHA256_DIGEST_BYTES, leaf_hash, SHA256_DIGEST_BYTES) == 0) {
+                    leaf_index = i;
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            return MERKLE_INVALID_ARGUMENT;
+        }
+    }
+
+    // Reuse existing index-based proof generator
+    return merkle_proof_generate(tree, leaf_index, proof_out);
 }

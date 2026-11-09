@@ -112,8 +112,9 @@ int main(void)
     unsigned char input[16] = {0};
     const MerkleLayout layouts[] = {MERKLE_LAYOUT_POINTER, MERKLE_LAYOUT_FLAT};
     for (size_t l = 0; l < 2; ++l) {
-        /* Pointer: 31 nodes + wrapper + workspace. Flat: buffer + wrapper. */
-        size_t allocations = layouts[l] == MERKLE_LAYOUT_FLAT ? 2 : 33;
+        /* Flat: tree(1) + map(1) + buckets(1) + flat_hashes(1) + 16 entries = 20.
+         * Pointer: tree(1) + map(1) + buckets(1) + workspace(1) + 31 nodes + 16 entries = 51. */
+        size_t allocations = layouts[l] == MERKLE_LAYOUT_FLAT ? 20 : 51;
         hash_fail_at = 0;
         for (size_t failure = 1; failure <= allocations + 1; ++failure) {
             allocation_count = 0;
@@ -123,11 +124,15 @@ int main(void)
                                                            layouts[l], &tree);
             if (failure <= allocations) {
                 if (status != MERKLE_OUT_OF_MEMORY || tree != NULL) {
+                    fprintf(stderr, "Failed at failure=%zu for layout=%zu (status=%d)\n",
+                            failure, l, status);
                     return EXIT_FAILURE;
                 }
             } else {
                 if (status != MERKLE_OK || tree == NULL
                     || allocation_count != allocations) {
+                    fprintf(stderr, "Failed full run for layout=%zu: allocs=%zu expected=%zu\n",
+                            l, allocation_count, allocations);
                     return EXIT_FAILURE;
                 }
                 merkle_free(tree);
