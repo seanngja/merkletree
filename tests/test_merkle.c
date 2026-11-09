@@ -145,6 +145,26 @@ static void test_merkle_proofs(void)
         merkle_free(flat_tree);
         free(data);
     }
+
+    // Boundary checks
+    unsigned char testing[32] = {0};
+    MerkleTree *tree = NULL;
+    CHECK(merkle_build(testing, 4, 8, &tree) == MERKLE_OK);
+    MerkleProof *proof = NULL;
+
+    CHECK(merkle_proof_generate(NULL, 0, &proof) == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_proof_generate(tree, 0, NULL) == MERKLE_INVALID_ARGUMENT);
+    CHECK(merkle_proof_generate(tree, 4, &proof) == MERKLE_INVALID_ARGUMENT);
+    CHECK(proof == NULL);
+
+    CHECK(merkle_proof_generate(tree, 0, &proof) == MERKLE_OK);
+    CHECK(merkle_proof_verify(testing, 0, NULL, proof) == -1);
+    CHECK(merkle_proof_verify(testing, 8, merkle_root_hash(tree), NULL) == -1);
+    CHECK(merkle_proof_verify(NULL, 8, merkle_root_hash(tree), proof) == -1);
+
+    merkle_proof_free(proof);
+    merkle_proof_free(NULL);
+    merkle_free(tree);
 }
 
 int main(void)

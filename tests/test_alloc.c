@@ -51,6 +51,62 @@ void __wrap_free(void *pointer)
     __real_free(pointer);
 }
 
+static void test_proof_allocation_failures(void)
+{
+    unsigned char input[16 * 32] = {0};
+    MerkleTree *tree = NULL;
+    if (merkle_build_with_layout(input, 16, 32, MERKLE_LAYOUT_FLAT, &tree) != MERKLE_OK) {
+        fprintf(stderr, "tree build failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // For depth > 0, proof generation makes 2 allocations: MerkleProof struct, proof->steps array
+    size_t tree_outstanding = outstanding;
+    for (size_t fail_step = 1; fail_step <= 2; ++fail_step) {
+        allocation_count = 0;
+        fail_at = fail_step;
+        MerkleProof *proof = NULL;
+        
+        MerkleStatus status = merkle_proof_generate(tree, 3, &proof);
+        if (status != MERKLE_OUT_OF_MEMORY || proof != NULL) {
+            fprintf(stderr, "Proof generation didn't report MERKLE_OUT_OF_MEMORY at failure=%zu\n", fail_step);
+            exit(EXIT_FAILURE);
+        }
+        if (outstanding != tree_outstanding) {
+            fprintf(stderr, "Proof generation leaked memory when failure=%zu\n", fail_step);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Verify no heap allocations
+    fail_at = 0;
+    allocation_count = 0;
+    MerkleProof *valid_proof = NULL;
+    if (merkle_proof_generate(tree, 3, &valid_proof) != MERKLE_OK) {
+        fprintf(stderr, "proof generation failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t allocs_before = allocation_count;
+    if (merkle_proof_verify(input + 3 * 32, 32, merkle_root_hash(tree), valid_proof) != 1) {
+        fprintf(stderr, "proof verification failed\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (allocation_count != allocs_before) {
+        fprintf(stderr, "merkle_proof_verify allocated dynamic memory on heap\n");
+        exit(EXIT_FAILURE);
+    }
+
+    merkle_proof_free(valid_proof);
+    merkle_free(tree);
+
+    if (outstanding != 0) {
+        fprintf(stderr, "cleanup memory failed\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
 int main(void)
 {
     unsigned char input[16] = {0};
@@ -94,6 +150,9 @@ int main(void)
             }
         }
     }
+
+    test_proof_allocation_failures();
+
     puts("Failure tests passed: every allocation/hash failure in both layouts cleaned up.");
     return EXIT_SUCCESS;
 }
