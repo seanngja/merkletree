@@ -95,6 +95,13 @@ typedef struct {
 MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index, 
                                    MerkleProof **proof_out);
 
+/* Generate an inclusion proof by leaf hash directly.
+ * Resolves the leaf index and generates the proof path.
+ * Returns MERKLE_OK on success, MERKLE_INVALID_ARGUMENT if not found or args invalid. */
+MerkleStatus merkle_proof_generate_hash(const MerkleTree *tree,
+                                        const unsigned char leaf_hash[SHA256_DIGEST_BYTES],
+                                        MerkleProof **proof_out);
+
 /* Verifies that block hashes along the proof path to expected_root.
  * Returns 1 if valid, 0 if invalid, -1 if argument/hash error. */
 int merkle_proof_verify(const void *block, size_t block_size, 

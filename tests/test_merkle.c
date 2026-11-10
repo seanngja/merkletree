@@ -99,7 +99,8 @@ static void run_proof_test_cases(const MerkleTree *tree, const unsigned char *da
 static void test_merkle_proofs(void)
 {
     const size_t block_size = 65;
-    for (size_t leaves = 1; leaves <= 64; leaves *= 2) {
+    const size_t max_leaves = 64;
+    for (size_t leaves = 1; leaves <= max_leaves; leaves *= 2) {
         size_t total_bytes = leaves * block_size;
         unsigned char *data = malloc(total_bytes);
         CHECK(data != NULL);
@@ -144,6 +145,74 @@ static void test_merkle_proofs(void)
         merkle_free(ptr_tree);
         merkle_free(flat_tree);
         free(data);
+    }
+}
+
+static void test_merkle_proof_generate_hash(void)
+{
+    const size_t block_size = 65;
+    const size_t max_leaves = 64;
+    unsigned char data[max_leaves * block_size];
+    for (size_t i = 0; i < sizeof(data); ++i) {
+        data[i] = (unsigned char)(i * 59 + 17);
+    }
+
+    const MerkleLayout layouts[] = {MERKLE_LAYOUT_POINTER, MERKLE_LAYOUT_FLAT};
+
+    for (size_t l = 0; l < 2; ++l) {
+        MerkleLayout layout = layouts[l];
+
+        for (size_t leaves = 1; leaves <= max_leaves; leaves *= 2) {
+            MerkleTree *tree = NULL;
+            CHECK(merkle_build_with_layout(data, leaves, block_size, layout, &tree) == MERKLE_OK);
+            const unsigned char *root = merkle_root_hash(tree);
+            CHECK(root != NULL);
+
+            // Test valid hash lookups for all leaves
+            for (size_t i = 0; i < leaves; ++i) {
+                unsigned char leaf_hash[SHA256_DIGEST_BYTES];
+                CHECK(sha256_digest(data + i * block_size, block_size, leaf_hash) == 0);
+
+                MerkleProof *hash_proof = NULL;
+                MerkleProof *idx_proof = NULL;
+
+                CHECK(merkle_proof_generate_hash(tree, leaf_hash, &hash_proof) == MERKLE_OK);
+                CHECK(merkle_proof_generate(tree, i, &idx_proof) == MERKLE_OK);
+                CHECK(hash_proof != NULL && idx_proof != NULL);
+
+                // Verify metadata equivalence
+                CHECK(hash_proof->leaf_index == i);
+                CHECK(hash_proof->depth == idx_proof->depth);
+
+                // Verify step-by-step path equivalence
+                for (size_t d = 0; d < hash_proof->depth; ++d) {
+                    CHECK(hash_proof->steps[d].side == idx_proof->steps[d].side);
+                    CHECK(memcmp(hash_proof->steps[d].hash, idx_proof->steps[d].hash,
+                                 SHA256_DIGEST_BYTES) == 0);
+                }
+
+                // Ensure the proof validates against root
+                CHECK(merkle_proof_verify(data + i * block_size, block_size, root, hash_proof) == 1);
+
+                merkle_proof_free(hash_proof);
+                merkle_proof_free(idx_proof);
+            }
+
+            // Test non-existent hash, must fail with MERKLE_INVALID_ARGUMENT
+            unsigned char missing_hash[SHA256_DIGEST_BYTES];
+            memset(missing_hash, 0xff, sizeof(missing_hash));
+            MerkleProof *bad_proof = NULL;
+            CHECK(merkle_proof_generate_hash(tree, missing_hash, &bad_proof) == MERKLE_INVALID_ARGUMENT);
+            CHECK(bad_proof == NULL);
+
+            // Test invalid argument boundaries
+            unsigned char dummy_hash[SHA256_DIGEST_BYTES] = {0};
+            CHECK(merkle_proof_generate_hash(NULL, dummy_hash, &bad_proof) == MERKLE_INVALID_ARGUMENT);
+            CHECK(merkle_proof_generate_hash(tree, NULL, &bad_proof) == MERKLE_INVALID_ARGUMENT);
+            CHECK(merkle_proof_generate_hash(tree, dummy_hash, NULL) == MERKLE_INVALID_ARGUMENT);
+
+            merkle_free(tree);
+        }
     }
 }
 
@@ -349,6 +418,7 @@ int main(void)
     }
 
     test_merkle_proofs();
+    test_merkle_proof_generate_hash();
     test_parallel_build();
 
     puts("C tests passed: SHA-256 vectors, tree structure, mutations, invalid inputs, proof generation, single verification.");
