@@ -753,3 +753,76 @@ int merkle_proof_verify(const void *block, size_t block_size,
     // Verify if recomputed root matches expected root
     return (memcmp(current_hash, expected_root, SHA256_DIGEST_BYTES) == 0) ? 1 : 0;
 }
+
+
+int merkle_proof_verify_batch(const void *const *blocks, size_t block_size,
+                              const unsigned char expected_root[SHA256_DIGEST_BYTES],
+                              const MerkleProof *const *proofs, size_t batch_size,
+                              MerkleBatchSchedule schedule, int num_threads,
+                              int *results_out)
+{
+    if (blocks == NULL || expected_root == NULL || proofs == NULL || batch_size == 0 
+        || (schedule != MERKLE_SCHED_SEQUENTIAL
+            && schedule != MERKLE_SCHED_STATIC
+            && schedule != MERKLE_SCHED_DYNAMIC)) {
+        return -1;
+    }
+
+    int all_valid = 1;
+
+    // Sequential Baseline
+    if (schedule == MERKLE_SCHED_SEQUENTIAL || num_threads == 1) {
+        for (size_t i = 0; i < batch_size; ++i) {
+            int res = merkle_proof_verify(blocks[i], block_size, expected_root, proofs[i]);
+            if (results_out != NULL) {
+                results_out[i] = res;
+            }
+            if (res != 1) {
+                all_valid = 0;
+            }
+        }
+        return all_valid;
+    }
+
+    // Resolve target thread count
+    int team = 1;
+#ifdef _OPENMP
+    team = num_threads > 0 ? num_threads : omp_get_max_threads();
+#else
+    (void)num_threads;
+#endif
+
+    // Parallel Worksharing: Static vs Work-Queue / Dynamic
+    if (schedule == MERKLE_SCHED_STATIC) {
+#pragma omp parallel for num_threads(team) schedule(static) default(none) \
+        shared(blocks, proofs, expected_root, results_out, block_size, batch_size) \
+        reduction(&:all_valid)
+        for (size_t i = 0; i < batch_size; ++i) {
+            int res = merkle_proof_verify(blocks[i], block_size, expected_root, proofs[i]);
+            if (results_out != NULL) {
+                results_out[i] = res;
+            }
+            if (res != 1) {
+                all_valid = 0;
+            }
+        }
+    } else if (schedule == MERKLE_SCHED_DYNAMIC) {
+        // OpenMP schedule(dynamic, chunk_size) acts as a work-queue
+#pragma omp parallel for num_threads(team) schedule(dynamic, 1) default(none) \
+        shared(blocks, proofs, expected_root, results_out, block_size, batch_size) \
+        reduction(&:all_valid)
+        for (size_t i = 0; i < batch_size; ++i) {
+            int res = merkle_proof_verify(blocks[i], block_size, expected_root, proofs[i]);
+            if (results_out != NULL) {
+                results_out[i] = res;
+            }
+            if (res != 1) {
+                all_valid = 0;
+            }
+        }
+    } else {
+        return -1;
+    }
+
+    return all_valid;
+}

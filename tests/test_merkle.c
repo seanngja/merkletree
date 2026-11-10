@@ -47,6 +47,7 @@ static size_t check_subtree(const MerkleNode *node, const unsigned char *data,
     return 1 + left + right;
 }
 
+
 /* Helper function to test proof verification and corruption scenarios. */
 static void run_proof_test_cases(const MerkleTree *tree, const unsigned char *data,
                                  size_t block_size) {
@@ -148,6 +149,7 @@ static void test_merkle_proofs(void)
     }
 }
 
+
 static void test_merkle_proof_generate_hash(void)
 {
     const size_t block_size = 65;
@@ -215,6 +217,7 @@ static void test_merkle_proof_generate_hash(void)
         }
     }
 }
+
 
 /* The parallel builders must reproduce every node of the sequential builds
  * for every thread count, including more threads than parents. */
@@ -288,6 +291,150 @@ static void test_parallel_build(void)
           == MERKLE_INVALID_ARGUMENT && bad == NULL);
     free(data);
 }
+
+
+static void test_merkle_proof_verify_batch(void)
+{
+    const size_t block_size = 33;
+    const size_t leaves = 64;
+    const size_t total_bytes = leaves * block_size;
+    unsigned char *data = malloc(total_bytes);
+    CHECK(data != NULL);
+    for (size_t i = 0; i < total_bytes; ++i) {
+        data[i] = (unsigned char)(i * 73 + 19);
+    }
+
+    // Build a reference tree to extract valid proofs
+    MerkleTree *tree = NULL;
+    CHECK(merkle_build_with_layout(data, leaves, block_size, MERKLE_LAYOUT_FLAT, &tree) == MERKLE_OK);
+    const unsigned char *root = merkle_root_hash(tree);
+    CHECK(root != NULL);
+
+    // Allocate and pre-generate a batch of proofs
+    const size_t batch_size = leaves;
+    const void *blocks[leaves];
+    MerkleProof *proofs[leaves];
+    int results[leaves];
+
+    for (size_t i = 0; i < batch_size; ++i) {
+        blocks[i] = data + i * block_size;
+        CHECK(merkle_proof_generate(tree, i, &proofs[i]) == MERKLE_OK);
+        CHECK(proofs[i] != NULL);
+    }
+
+    const MerkleBatchSchedule schedules[] = {
+        MERKLE_SCHED_SEQUENTIAL,
+        MERKLE_SCHED_STATIC,
+        MERKLE_SCHED_DYNAMIC
+    };
+    const int thread_counts[] = {1, 2, 4, 8, 32};
+
+    // All valid proofs across all schedules and thread counts
+    for (size_t s = 0; s < sizeof(schedules) / sizeof(schedules[0]); ++s) {
+        for (size_t t = 0; t < sizeof(thread_counts) / sizeof(thread_counts[0]); ++t) {
+            memset(results, -1, sizeof(results));
+            int status = merkle_proof_verify_batch(
+                blocks, block_size, root,
+                (const MerkleProof *const *)proofs, batch_size,
+                schedules[s], thread_counts[t], results
+            );
+
+            CHECK(status == 1);
+            for (size_t i = 0; i < batch_size; ++i) {
+                CHECK(results[i] == 1);
+            }
+
+            // Test with results_out == NULL for aggregate only
+            int agg_only = merkle_proof_verify_batch(
+                blocks, block_size, root,
+                (const MerkleProof *const *)proofs, batch_size,
+                schedules[s], thread_counts[t], NULL
+            );
+            CHECK(agg_only == 1);
+        }
+    }
+
+    // Tampered leaf data: corrupt one block in the batch
+    unsigned char bad_block[block_size];
+    memcpy(bad_block, blocks[3], block_size);
+    bad_block[0] ^= 0x5a;
+    const void *saved_block = blocks[3];
+    blocks[3] = bad_block;
+
+    for (size_t s = 0; s < sizeof(schedules) / sizeof(schedules[0]); ++s) {
+        memset(results, -1, sizeof(results));
+        int status = merkle_proof_verify_batch(
+            blocks, block_size, root,
+            (const MerkleProof *const *)proofs, batch_size,
+            schedules[s], 4, results
+        );
+
+        // Aggregate must report failure
+        CHECK(status == 0);
+        // Index 3 must fail, all other independent proofs must remain valid
+        for (size_t i = 0; i < batch_size; ++i) {
+            if (i == 3) {
+                CHECK(results[i] == 0);
+            } else {
+                CHECK(results[i] == 1);
+            }
+        }
+    }
+    blocks[3] = saved_block;    // Restore
+
+    // Tampered Proof: corrupt a sibling hash inside one proof
+    proofs[5]->steps[0].hash[0] ^= 0xff;
+    for (size_t s = 0; s < sizeof(schedules) / sizeof(schedules[0]); ++s) {
+        memset(results, -1, sizeof(results));
+        int status = merkle_proof_verify_batch(
+            blocks, block_size, root,
+            (const MerkleProof *const *)proofs, batch_size,
+            schedules[s], 4, results
+        );
+        CHECK(status == 0);
+        CHECK(results[5] == 0);
+        CHECK(results[0] == 1);
+    }
+    proofs[5]->steps[0].hash[0] ^= 0xff;    // Restore
+
+    // Tampered Root: an incorrect root must reject all proofs in batch
+    unsigned char bad_root[SHA256_DIGEST_BYTES];
+    memcpy(bad_root, root, SHA256_DIGEST_BYTES);
+    bad_root[0] ^= 0x01;
+
+    memset(results, -1, sizeof(results));
+    CHECK(merkle_proof_verify_batch(blocks, block_size, bad_root,
+                                    (const MerkleProof *const *)proofs,
+                                    batch_size, MERKLE_SCHED_STATIC,
+                                    4, results) == 0);
+    for (size_t i = 0; i < batch_size; ++i) {
+        CHECK(results[i] == 0);
+    }
+
+    // Argument Validation and Error Returns
+    CHECK(merkle_proof_verify_batch(NULL, block_size, root,
+                                    (const MerkleProof *const *)proofs,
+                                    batch_size, MERKLE_SCHED_STATIC, 1, results) == -1);
+    CHECK(merkle_proof_verify_batch(blocks, block_size, NULL,
+                                    (const MerkleProof *const *)proofs,
+                                    batch_size, MERKLE_SCHED_STATIC, 1, results) == -1);
+    CHECK(merkle_proof_verify_batch(blocks, block_size, root,
+                                    NULL, batch_size, MERKLE_SCHED_STATIC, 1, results) == -1);
+    CHECK(merkle_proof_verify_batch(blocks, block_size, root,
+                                    (const MerkleProof *const *)proofs,
+                                    0, MERKLE_SCHED_STATIC, 1, results) == -1);
+    CHECK(merkle_proof_verify_batch(blocks, block_size, root,
+                                    (const MerkleProof *const *)proofs,
+                                    batch_size, (MerkleBatchSchedule)99, 1, results) == -1);
+
+    // Cleanup
+    for (size_t i = 0; i < batch_size; ++i) {
+        merkle_proof_free(proofs[i]);
+    }
+    merkle_free(tree);
+    free(data);
+}
+
 
 int main(void)
 {
@@ -419,8 +566,10 @@ int main(void)
 
     test_merkle_proofs();
     test_merkle_proof_generate_hash();
+    test_merkle_proof_verify_batch();
     test_parallel_build();
 
-    puts("C tests passed: SHA-256 vectors, tree structure, mutations, invalid inputs, proof generation, single verification.");
+    puts("C tests passed: SHA-256 vectors, tree structure, mutations, invalid inputs, "
+         "proof generation, single verification, batched verification.");
     return EXIT_SUCCESS;
 }
