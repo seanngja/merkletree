@@ -95,6 +95,13 @@ typedef struct {
 MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index, 
                                    MerkleProof **proof_out);
 
+/* Generate an inclusion proof by leaf hash directly.
+ * Resolves the leaf index and generates the proof path.
+ * Returns MERKLE_OK on success, MERKLE_INVALID_ARGUMENT if not found or args invalid. */
+MerkleStatus merkle_proof_generate_hash(const MerkleTree *tree,
+                                        const unsigned char leaf_hash[SHA256_DIGEST_BYTES],
+                                        MerkleProof **proof_out);
+
 /* Verifies that block hashes along the proof path to expected_root.
  * Returns 1 if valid, 0 if invalid, -1 if argument/hash error. */
 int merkle_proof_verify(const void *block, size_t block_size, 
@@ -103,5 +110,29 @@ int merkle_proof_verify(const void *block, size_t block_size,
 
 /* Frees a previously generated proof. Accepts NULL. */
 void merkle_proof_free(MerkleProof *proof);
+
+
+/* Scheduling strategies for batched proof verification */
+typedef enum {
+    MERKLE_SCHED_SEQUENTIAL = 0,
+    MERKLE_SCHED_STATIC,        // Static chunk distribution
+    MERKLE_SCHED_DYNAMIC        // Work-queue / dynamic chunk distribution
+} MerkleBatchSchedule;
+
+/* Batched verification:
+ * - blocks: array of pointers to raw leaf data blocks (count = batch_size)
+ * - proofs: array of pointers to MerkleProof structs (count = batch_size)
+ * - results: output array of ints (size = batch_size); 1 if valid, 0 if invalid, -1 on error
+ * - num_threads: thread count (ignored if MERKLE_SCHED_SEQUENTIAL)
+ * 
+ * Returns 1 if all proofs in the batch verified, 0 if at least one was rejected,
+ * or -1 on argument/parameter errors.
+ */
+int merkle_proof_verify_batch(const void *const *blocks, size_t block_size,
+                              const unsigned char expected_root[SHA256_DIGEST_BYTES],
+                              const MerkleProof *const *proofs, size_t batch_size,
+                              MerkleBatchSchedule schedule, int num_threads,
+                              int *results_out);
+
 
 #endif

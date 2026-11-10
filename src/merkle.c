@@ -659,6 +659,64 @@ MerkleStatus merkle_proof_generate(const MerkleTree *tree, size_t leaf_index,
     return MERKLE_OK;
 }
 
+
+/* Pointer layout recursive DFS scan to find leaf index from hash
+ * Returns 1 with index in out_idx if found, 
+ * Returns 0 on failure */
+static int find_leaf_index_pointer(const MerkleNode *node, size_t depth,
+                                   const unsigned char hash[SHA256_DIGEST_BYTES],
+                                   size_t *curr_idx, size_t *out_idx)
+{
+    if (node == NULL) {
+        return 0;
+    }
+    if (depth == 0) {
+        if (memcmp(node->hash, hash, SHA256_DIGEST_BYTES) == 0) {
+            *out_idx = *curr_idx;
+            return 1;
+        }
+        (*curr_idx)++;
+        return 0;
+    }
+    if (find_leaf_index_pointer(node->left, depth - 1, hash, curr_idx, out_idx)) {
+        return 1;
+    }
+    return find_leaf_index_pointer(node->right, depth - 1, hash, curr_idx, out_idx);
+}
+
+MerkleStatus merkle_proof_generate_hash(const MerkleTree *tree,
+                                        const unsigned char leaf_hash[SHA256_DIGEST_BYTES],
+                                        MerkleProof **proof_out)
+{
+    if (tree == NULL || leaf_hash == NULL || proof_out == NULL) {
+        return MERKLE_INVALID_ARGUMENT;
+    }
+
+    size_t leaf_index = 0;
+    int found = 0;
+
+    if (tree->layout == MERKLE_LAYOUT_FLAT) {
+        for (size_t i = 0; i < tree->leaf_count; ++i) {
+            if (memcmp(tree->flat_hashes + i * SHA256_DIGEST_BYTES,
+                       leaf_hash, SHA256_DIGEST_BYTES) == 0) {
+                leaf_index = i;
+                found = 1;
+                break;
+            }
+        }
+    } else {
+        size_t curr = 0;
+        size_t depth = compute_tree_depth(tree->leaf_count);
+        found = find_leaf_index_pointer(tree->root, depth, leaf_hash, &curr, &leaf_index);
+    }
+
+    if (!found) {
+        return MERKLE_INVALID_ARGUMENT;
+    }
+    return merkle_proof_generate(tree, leaf_index, proof_out);
+}
+
+
 int merkle_proof_verify(const void *block, size_t block_size, 
                         const unsigned char expected_root[SHA256_DIGEST_BYTES], 
                         const MerkleProof *proof)
@@ -694,4 +752,77 @@ int merkle_proof_verify(const void *block, size_t block_size,
 
     // Verify if recomputed root matches expected root
     return (memcmp(current_hash, expected_root, SHA256_DIGEST_BYTES) == 0) ? 1 : 0;
+}
+
+
+int merkle_proof_verify_batch(const void *const *blocks, size_t block_size,
+                              const unsigned char expected_root[SHA256_DIGEST_BYTES],
+                              const MerkleProof *const *proofs, size_t batch_size,
+                              MerkleBatchSchedule schedule, int num_threads,
+                              int *results_out)
+{
+    if (blocks == NULL || expected_root == NULL || proofs == NULL || batch_size == 0 
+        || (schedule != MERKLE_SCHED_SEQUENTIAL
+            && schedule != MERKLE_SCHED_STATIC
+            && schedule != MERKLE_SCHED_DYNAMIC)) {
+        return -1;
+    }
+
+    int all_valid = 1;
+
+    // Sequential Baseline
+    if (schedule == MERKLE_SCHED_SEQUENTIAL || num_threads == 1) {
+        for (size_t i = 0; i < batch_size; ++i) {
+            int res = merkle_proof_verify(blocks[i], block_size, expected_root, proofs[i]);
+            if (results_out != NULL) {
+                results_out[i] = res;
+            }
+            if (res != 1) {
+                all_valid = 0;
+            }
+        }
+        return all_valid;
+    }
+
+    // Resolve target thread count
+    int team = 1;
+#ifdef _OPENMP
+    team = num_threads > 0 ? num_threads : omp_get_max_threads();
+#else
+    (void)num_threads;
+#endif
+
+    // Parallel Worksharing: Static vs Work-Queue / Dynamic
+    if (schedule == MERKLE_SCHED_STATIC) {
+#pragma omp parallel for num_threads(team) schedule(static) default(none) \
+        shared(blocks, proofs, expected_root, results_out, block_size, batch_size) \
+        reduction(&:all_valid)
+        for (size_t i = 0; i < batch_size; ++i) {
+            int res = merkle_proof_verify(blocks[i], block_size, expected_root, proofs[i]);
+            if (results_out != NULL) {
+                results_out[i] = res;
+            }
+            if (res != 1) {
+                all_valid = 0;
+            }
+        }
+    } else if (schedule == MERKLE_SCHED_DYNAMIC) {
+        // OpenMP schedule(dynamic, chunk_size) acts as a work-queue
+#pragma omp parallel for num_threads(team) schedule(dynamic, 1) default(none) \
+        shared(blocks, proofs, expected_root, results_out, block_size, batch_size) \
+        reduction(&:all_valid)
+        for (size_t i = 0; i < batch_size; ++i) {
+            int res = merkle_proof_verify(blocks[i], block_size, expected_root, proofs[i]);
+            if (results_out != NULL) {
+                results_out[i] = res;
+            }
+            if (res != 1) {
+                all_valid = 0;
+            }
+        }
+    } else {
+        return -1;
+    }
+
+    return all_valid;
 }
