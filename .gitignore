@@ -2,3 +2,4 @@
 build/
 build-sanitize/
 __pycache__/
+hpc_upload/

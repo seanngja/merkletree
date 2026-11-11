@@ -1,0 +1,49 @@
+date: 2026-11-10T21:07:59+0800
+host: cnode-33-43-45
+pbs_jobid: 1039013.venus01
+pbs_ncpus: 48
+allowed_cpus: 40-63,72-95
+physical_cores_used: 48
+threads_swept: 1,2,4,8,16,32,48
+OMP_PROC_BIND=close OMP_PLACES=cores
+compile: gcc -Iinclude -O2 -g -std=c17 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fopenmp
+compiler: cc (GCC) 13.3.0
+glibc: ldd (GNU libc) 2.17
+hash: SHA-256, in-tree implementation src/sha256.c (no external library)
+benchmark: tree construction
+seed: 1  reps: 30  warmup: 10  (inputs >= 256 MiB: reps 10 warmup 2)
+leaves: 1024 16384 262144 4194304  blocks: 32 256 4096
+levels: leaves 16384 4194304  blocks 32 4096 (flat parallel, profiled build)
+--- lscpu ---
+Architecture:          x86_64
+CPU op-mode(s):        32-bit, 64-bit
+Byte Order:            Little Endian
+CPU(s):                96
+On-line CPU(s) list:   0-95
+Thread(s) per core:    1
+Core(s) per socket:    48
+Socket(s):             2
+NUMA node(s):          4
+Vendor ID:             AuthenticAMD
+CPU family:            25
+Model:                 1
+Model name:            AMD EPYC 7R13 Processor
+Stepping:              1
+CPU MHz:               2649.998
+BogoMIPS:              5299.99
+Hypervisor vendor:     KVM
+Virtualization type:   full
+L1d cache:             32K
+L1i cache:             32K
+L2 cache:              512K
+L3 cache:              16384K
+NUMA node0 CPU(s):     0-23
+NUMA node1 CPU(s):     24-47
+NUMA node2 CPU(s):     48-71
+NUMA node3 CPU(s):     72-95
+Flags:                 fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc art rep_good nopl nonstop_tsc extd_apicid aperfmperf eagerfpu pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy cr8_legacy abm sse4a misalignsse 3dnowprefetch topoext perfctr_core cpb invpcid_single retpoline_amd ssbd ibrs ibpb stibp vmmcall fsgsbase bmi1 avx2 smep bmi2 invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 clzero xsaveerptr arat npt nrip_save vaes vpclmulqdq spec_ctrl intel_stibp
+--- cache (lscpu -C) ---
+--- memory ---
+              total        used        free      shared  buff/cache   available
+Mem:            369          64         289           0          15         303
+Swap:             0           0           0

@@ -11,7 +11,7 @@ OPENMP ?= -fopenmp
 
 LIB_OBJECTS = $(BUILD)/merkle.o $(BUILD)/sha256.o
 
-.PHONY: all test sanitize clean
+.PHONY: all bench print-flags test sanitize clean
 all: $(BUILD)/merkle_baseline
 
 $(BUILD):
@@ -22,6 +22,27 @@ $(BUILD)/%.o: src/%.c | $(BUILD)
 
 $(BUILD)/merkle_baseline: $(BUILD)/main.o $(LIB_OBJECTS)
 	$(CC) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(BUILD)/merkle_bench: $(BUILD)/bench_proof.o $(LIB_OBJECTS)
+	$(CC) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(BUILD)/merkle_bench_build: $(BUILD)/bench_build.o $(LIB_OBJECTS)
+	$(CC) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# Instrumented copy of the library for per-level timing (include/merkle_profile.h).
+$(BUILD)/prof:
+	mkdir -p $@
+
+$(BUILD)/prof/merkle.o: src/merkle.c | $(BUILD)/prof
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPENMP) -DMERKLE_PROFILE -MMD -MP -c $< -o $@
+
+$(BUILD)/merkle_bench_levels: $(BUILD)/bench_levels.o $(BUILD)/prof/merkle.o $(BUILD)/sha256.o
+	$(CC) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+bench: $(BUILD)/merkle_bench $(BUILD)/merkle_bench_build $(BUILD)/merkle_bench_levels
+
+print-flags:
+	@echo "$(CC) $(CPPFLAGS) $(CFLAGS) $(OPENMP)"
 
 $(BUILD)/test_merkle: tests/test_merkle.c $(LIB_OBJECTS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(OPENMP) $(LDFLAGS) $^ $(LDLIBS) -o $@
@@ -44,4 +65,4 @@ sanitize:
 clean:
 	$(RM) -r build build-sanitize
 
--include $(wildcard $(BUILD)/*.d)
+-include $(wildcard $(BUILD)/*.d $(BUILD)/prof/*.d)

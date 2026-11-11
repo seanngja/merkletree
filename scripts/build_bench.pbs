@@ -1,0 +1,25 @@
+#!/bin/bash
+#PBS -P merkle_build_bench
+#PBS -q parallel
+#PBS -l select=1:ncpus=48:mem=64gb
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -N merkle_build
+
+# Tree construction benchmark (Tasks 1-3).
+# Submit from the repo root on a login node:   qsub scripts/build_bench.pbs
+# Do not run the benchmark on the login node itself.
+# 2^22 leaves x 4 KiB = 16 GiB of input, hence mem=64gb. The largest
+# configuration dominates the runtime (sequential builds of 16 GiB).
+
+cd "${PBS_O_WORKDIR}" || exit 1
+
+# Compiler with OpenMP (matches the laptop toolchain, GCC 13.3.0).
+source /app1/ebenv
+module load GCC/13.3.0 || exit 1
+export CC=gcc MAKEFLAGS="CC=gcc"   # Makefile hard-codes CC = cc; use the module gcc
+which gcc && gcc --version | head -1
+
+make clean >/dev/null
+scripts/run_build_bench.sh
+exit $?

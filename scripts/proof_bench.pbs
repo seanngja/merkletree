@@ -1,0 +1,23 @@
+#!/bin/bash
+#PBS -P merkle_proof_bench
+#PBS -q parallel
+#PBS -l select=1:ncpus=48:mem=64gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -N merkle_bench
+
+# Submit from the repo root on a login node:   qsub scripts/proof_bench.pbs
+# Do not run the benchmark on the login node itself.
+# 2^22 leaves x 4 KiB = 16 GiB of input, hence mem=64gb.
+
+cd "${PBS_O_WORKDIR}" || exit 1
+
+# Compiler with OpenMP (matches the laptop toolchain, GCC 13.3.0).
+source /app1/ebenv
+module load GCC/13.3.0 || exit 1
+export CC=gcc MAKEFLAGS="CC=gcc"   # Makefile hard-codes CC = cc; use the module gcc
+which gcc && gcc --version | head -1
+
+make clean >/dev/null
+scripts/run_proof_bench.sh
+exit $?

@@ -9,6 +9,89 @@
 #include <omp.h>
 #endif
 
+/* Optional per-level instrumentation of build_flat_parallel (see
+ * include/merkle_profile.h). Compiled out unless -DMERKLE_PROFILE. */
+#ifdef MERKLE_PROFILE
+#ifndef _OPENMP
+#error "MERKLE_PROFILE requires OpenMP"
+#endif
+#include "merkle_profile.h"
+
+static MerkleBuildProfile g_prof;
+
+const MerkleBuildProfile *merkle_build_profile(void)
+{
+    return &g_prof;
+}
+
+/* Called by every thread at region start: align threads, then each stamps
+ * its own start of the leaf level. */
+static void prof_start(void)
+{
+    int tid = omp_get_thread_num();
+    if (tid == 0) {
+        g_prof.team = omp_get_num_threads();
+        g_prof.levels = 0;
+        g_prof.tail_levels = 0;
+        g_prof.tail_nodes = 0;
+    }
+#pragma omp barrier
+    double t = omp_get_wtime();
+    if (tid == 0) {
+        g_prof.start = t;
+    }
+    if (tid < MERKLE_PROF_MAX_THREADS) {
+        g_prof.thread_start[0][tid] = t;
+    }
+}
+
+/* Called by every thread after a `nowait` level loop; contains the barrier
+ * that the implicit one would otherwise provide. Each thread records when it
+ * finished its share and when it left the barrier (= start of next level). */
+static void prof_level_done(size_t level, size_t nodes)
+{
+    int tid = omp_get_thread_num();
+    int rec = tid < MERKLE_PROF_MAX_THREADS && level < MERKLE_PROF_MAX_LEVELS;
+    if (rec) {
+        g_prof.thread_done[level][tid] = omp_get_wtime();
+    }
+    if (tid == 0 && level < MERKLE_PROF_MAX_LEVELS) {
+        g_prof.nodes[level] = nodes;
+        g_prof.levels = level + 1;
+    }
+#pragma omp barrier
+    if (rec) {
+        g_prof.thread_start[level + 1][tid] = omp_get_wtime();
+    }
+}
+
+/* Tail helpers run inside `omp single`; functions (not macros) so that the
+ * default(none) region never names g_prof lexically. */
+static void prof_tail_start(void) { g_prof.tail_start = omp_get_wtime(); }
+static void prof_tail_level(size_t nodes)
+{
+    g_prof.tail_levels++;
+    g_prof.tail_nodes += nodes;
+}
+static void prof_tail_end(void) { g_prof.tail_end = omp_get_wtime(); }
+
+#define PROF_NOWAIT nowait
+#define PROF_START() prof_start()
+#define PROF_LEVEL_DONE(level, nodes) prof_level_done((level), (nodes))
+#define PROF_TAIL_START() prof_tail_start()
+#define PROF_TAIL_LEVEL(nodes) prof_tail_level(nodes)
+#define PROF_TAIL_END() prof_tail_end()
+#define PROF_END() (g_prof.end = omp_get_wtime())
+#else
+#define PROF_NOWAIT
+#define PROF_START() ((void)0)
+#define PROF_LEVEL_DONE(level, nodes) ((void)(level), (void)(nodes))
+#define PROF_TAIL_START() ((void)0)
+#define PROF_TAIL_LEVEL(nodes) ((void)(nodes))
+#define PROF_TAIL_END() ((void)0)
+#define PROF_END() ((void)0)
+#endif
+
 static void free_node(MerkleNode *node)
 {
     if (node != NULL) {
@@ -264,8 +347,9 @@ static MerkleStatus build_flat_parallel(const unsigned char *data,
             team_size = team;
         }
 #endif
+        PROF_START();
         /* Level 0: leaves. */
-#pragma omp for schedule(static)
+#pragma omp for schedule(static) PROF_NOWAIT
         for (size_t i = 0; i < leaf_count; ++i) {
             int stop;
 #pragma omp atomic read
@@ -276,15 +360,18 @@ static MerkleStatus build_flat_parallel(const unsigned char *data,
                 failed = 1;
             }
         }   /* implicit barrier: all leaves written */
+        PROF_LEVEL_DONE(0, leaf_count);  /* profiled build: explicit barrier */
 
         /* Every thread holds identical private copies of offset/width, so all
          * threads encounter the same sequence of worksharing loops. */
         const size_t cutoff = (size_t)team * MERKLE_MIN_PARENTS_PER_THREAD;
         size_t offset = 0;
         size_t width = leaf_count;
+        size_t level = 0;
         for (; width / 2 >= cutoff; width /= 2) {
             const size_t parent_offset = offset + width;
-#pragma omp for schedule(static)
+            ++level;
+#pragma omp for schedule(static) PROF_NOWAIT
             for (size_t i = 0; i < width / 2; ++i) {
                 int stop;
 #pragma omp atomic read
@@ -295,6 +382,7 @@ static MerkleStatus build_flat_parallel(const unsigned char *data,
                     failed = 1;
                 }
             }   /* implicit barrier: level complete before the next starts */
+            PROF_LEVEL_DONE(level, width / 2);
             offset = parent_offset;
         }
 
@@ -302,6 +390,7 @@ static MerkleStatus build_flat_parallel(const unsigned char *data,
          * them because a single thread executes them in order. */
 #pragma omp single
         {
+            PROF_TAIL_START();
             for (; width > 1 && !failed; width /= 2) {
                 const size_t parent_offset = offset + width;
                 for (size_t i = 0; i < width / 2; ++i) {
@@ -311,10 +400,13 @@ static MerkleStatus build_flat_parallel(const unsigned char *data,
                         break;
                     }
                 }
+                PROF_TAIL_LEVEL(width / 2);
                 offset = parent_offset;
             }
+            PROF_TAIL_END();
         }
     }   /* end of parallel region: implicit barrier and join */
+    PROF_END();
 
     tree->build_threads = (size_t)team_size;
     return failed ? MERKLE_HASH_ERROR : MERKLE_OK;
